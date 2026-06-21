@@ -1,8 +1,8 @@
 # studiqarch — Profil-Architektur v2
 
-*Abgeleitetes Domänen-Profil auf dem **lakearch-Kernel v4** (siehe `../../lakearch/semantics/arch4.md`).*
+*Abgeleitetes Domänen-Profil auf dem **lakearch-Kernel** (siehe `../../lakearch/semantics/lakearch.md`).*
 
-**studiqarch-v2 ersetzt v1.** Neu in v2: die **Profil-Politiken** zu den drei Kernel-Prozessen, die in arch4 §11–§13 gelöst wurden (Identitäts-Auflösung, Materialisierung, Zugriff). Erinnerung an die Schichtung: Kernel = Mechanik (domänen-übergreifend), studiqarch = Politik (lern-spezifisch), beide nach der Governance-Regel getrennt.
+**studiqarch-v2 ersetzt v1.** Neu in v2: die **Profil-Politiken** zu den drei Kernel-Prozessen, die in lakearch §9–§11 beschrieben sind (Identitäts-Auflösung, Materialisierung, Zugriff). Erinnerung an die Schichtung — drei Ebenen, getrennt nach der **Governance-Triade** *Vokabular → Profil · Primitiv → Kernel · Berechnung → Schicht darüber*: Kernel = Mechanik (lakearch, domänen-übergreifend), **Rechen-Schicht** = Berechnung (`compute-layer.md`), studiqarch = Politik (lern-spezifisch).
 
 Domäne: **Lernen / Klausurvorbereitung.** studiqarch ist die erste Forcing-Function für lakearch.
 
@@ -14,7 +14,7 @@ studiq führt pro Lernendem ein **lebendes Wissensmodell**: einen **Konzeptgraph
 
 ## 2. Vokabular (als Daten)
 
-- **Typen:** `Konzept` (referenzielle Identität → Klassen-Knoten, arch4 §11.1), `Quelle`, `Karte`, `Abruf-Versuch` (Attempt), `Modul` (weiches Objektiv), `Probeklausur`/`Prüfungsaufgabe`.
+- **Typen:** `Konzept` (referenzielle Identität → Klassen-Knoten/Anker, lakearch §9.1), `Quelle`, `Karte`, `Abruf-Versuch` (Attempt), `Modul` (weiches Objektiv), `Probeklausur`/`Prüfungsaufgabe`.
 - **Relationen:** `stammt-aus`, `prüft`, `betrifft`, `setzt-voraus`, `teil-von`, `widerspricht`, `wird-geprüft-in`.
 - **Kategorie** (degradierte CrashVault-Taxonomie: Foliensatz/Mitschriften/Cheatsheets/Übungen/Probeklausuren/Klausurvorbereitung/Notizen/Quellen) = `kategorie`-Kontext **an der Quelle** (Provenienz), nicht primäres Ordnungssystem.
 - **Identitäts-Grade:** vom Kernel geerbt; studiq nutzt v. a. den Korrelations-Pfad beim Ingest.
@@ -40,14 +40,14 @@ Retrieval Practice → `Abruf-Versuch` als Daten · Spacing → bitemporale Gül
 
 ## 7. Profil-Politiken zu den Kernel-Prozessen (vormals „die 5 Risse")
 
-Die Mechanik liegt im Kernel (arch4 §11–§13). Hier die **studiq-Politik** — die konkreten Werte/Kriterien, die studiq in die Kernel-Erweiterungspunkte einsetzt.
+Die Mechanik (Strukturen) liegt im Kernel (lakearch §9–§11); die Berechnung darauf (Platzierung, Auflösung, Re-Korrelation) in der Rechen-Schicht (`compute-layer.md`). Hier die **studiq-Politik** — die konkreten Werte/Kriterien, die studiq in beide einsetzt.
 
-### 7.1 Identitäts-Auflösung (arch4 §11)
+### 7.1 Identitäts-Auflösung (lakearch §9; Berechnung: `compute-layer.md` §2)
 - **Konzept-Anker:** Jedes mehrfach belegte Konzept bekommt einen Klassen-Knoten; **Karten/Mastery/Plan hängen am Anker**, nie an einem Repräsentanten.
 - **Clustering-Schwellen (Startwerte, kalibrierbar):** `verwandt_mit` ab ~0.80 (anzeigen, „bestätigen?"); automatische Klassen-Zusammenlegung erst ab ~0.95; darunter getrennt lassen. **Keine transitive Closure** — Cut-Clustering.
 - **Split-Kriterium:** widerspricht eine höher-vertraute Quelle oder eine menschliche Korrektur, wird die Klasse geteilt.
 
-### 7.2 Resolver-Vertrauensränge (arch4 §11.3)
+### 7.2 Resolver-Vertrauensränge (lakearch §5.6 Vertrauensgrad als Quell-Kontext, §8.2 Quell-Gewichtung beim Lesen)
 Startordnung (absteigend), kalibrierbar:
 1. **Mensch (Lernender/Lehrender)** — selten, autoritativ, haftet.
 2. **Offizielle Quellen mit Lösung** — Lösungsschlüssel, geprüfte Probeklausuren.
@@ -56,18 +56,18 @@ Startordnung (absteigend), kalibrierbar:
 5. **KI-Extraktion aus klarem Text.**
 6. **KI-Vermutung** (Bild ohne OCR, Dateiname).
 
-### 7.3 Kuratierung via DevLab-Runner (arch4 §11.4)
+### 7.3 Kuratierung via DevLab-Runner (lakearch §9.5)
 - Hintergrund-Runner (über DevLab orchestriert) legen Dubletten-Klassen zusammen und **verbergen** Müll (tote Karten, leere Konzepte) — **reversibel**, nie löschend.
 - **Konservativ starten:** nur hoch-konfidente Merges (≥0.95), alles ein Klick rücknehmbar; idempotent & konvergent.
 - Physisches Löschen (Compaction) bleibt seltene, gesonderte Operation.
 
-### 7.4 Checkpoint-Politik (arch4 §12)
+### 7.4 Checkpoint-Politik (lakearch §10 Materialisierung)
 - **Was:** pro Konzept-Anker die **SR-Parameter** (Stabilität, letzte Wiederholung, Schwierigkeit) — **nicht** die abgeleitete Mastery-Prozentzahl.
 - **Kadenz:** ein neuer Checkpoint nach jeder Lern-Session (+ bei Bedarf nach Merge/Split-Invalidierung).
 - **Live-Mastery** = Checkpoint + Vergessenskurve über verstrichene Zeit (billig).
 - **SR-Algorithmus:** noch zu wählen (§8 B-neu).
 
-### 7.5 Zugriff (arch4 §13)
+### 7.5 Zugriff (lakearch §11)
 - **Scopes:** Vault als Scope-Label; Modul kann über Vaults geteilt sein (mehrere Scopes pro Daten).
 - **Rechte:** `lesen` / `schreiben` / `besitzen` (Owner verwaltet Grants).
 - **Geteilte Konzepte:** ein geteilter Klassen-Knoten, dessen private Repräsentanten beim Lesen pro Scope gefiltert werden (filter-before-resolve — kein Leak privater Quellen).
