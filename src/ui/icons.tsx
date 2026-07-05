@@ -402,6 +402,14 @@ export const ChatIcon = (p: IconProps) => (
   </Svg>
 );
 
+/** Horizontal swap (⇄) — the Note perspective toggle (Modul ⇄ Session). */
+export const SwapIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M7 8h11M15 5l3 3-3 3" />
+    <path d="M17 16H6M9 13l-3 3 3 3" />
+  </Svg>
+);
+
 /** Generic sparkle — used for the "Add manually / classify" affordance. */
 export const SparkleIcon = (p: IconProps) => (
   <Svg {...p}>

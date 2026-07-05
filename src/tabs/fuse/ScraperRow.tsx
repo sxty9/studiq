@@ -1,12 +1,10 @@
 import type { Scraper, ScraperStatus } from '@/types';
 import { cn } from '@/lib/cn';
+import { modelLabel, scheduleLabel } from '@/lib/scrapers';
 import { IconButton } from '@/ui/Button';
 import { Toggle } from '@/ui/Toggle';
 import { DotIcon, PlayIcon } from '@/ui/icons';
 import { relativeTime } from './IngestFeed';
-
-const SCHEDULE_LABEL: Record<string, string> = { manual: 'manuell', daily: 'täglich', weekly: 'wöchentlich' };
-const scheduleLabel = (s: string) => SCHEDULE_LABEL[s] ?? s;
 
 const STATUS_COLOR: Record<ScraperStatus, string> = {
   ok: 'text-success',
@@ -47,19 +45,16 @@ export function ScraperRow({
         onClick={onEdit}
         className="min-w-0 flex-1 rounded-sm text-left transition-colors duration-fast focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
       >
-        <p className="truncate text-subhead font-medium text-text-primary">{scraper.sourceLabel}</p>
-        <div className="mt-1 flex flex-wrap items-center gap-1.5">
-          {scraper.kategorie.slice(0, 3).map((k) => (
-            <span key={k} className="rounded-full bg-fill/10 px-2 py-0.5 text-caption text-text-secondary">
-              {k}
-            </span>
-          ))}
-          {scraper.kategorie.length > 3 && (
-            <span className="text-caption text-text-tertiary">+{scraper.kategorie.length - 3}</span>
-          )}
-          <span className="text-caption text-text-tertiary">· {scheduleLabel(scraper.schedule)}</span>
-        </div>
-        <div className="mt-1">
+        <p className="truncate text-subhead font-medium text-text-primary">{scraper.name}</p>
+        <p className="mt-0.5 flex items-center gap-1.5">
+          <span className="shrink-0 rounded-full bg-fill/10 px-2 py-0.5 text-caption text-text-secondary">
+            {modelLabel(scraper.model)}
+          </span>
+          <span className="min-w-0 truncate font-mono text-caption text-text-tertiary">{scraper.source}</span>
+        </p>
+        <div className="mt-1 flex items-center gap-1.5 text-caption text-text-tertiary">
+          <span>{scheduleLabel(scraper)}</span>
+          <span aria-hidden>·</span>
           <LastRun scraper={scraper} />
         </div>
       </button>
@@ -68,7 +63,7 @@ export function ScraperRow({
         <Toggle
           checked={scraper.enabled}
           onChange={(next) => onUpdate({ enabled: next })}
-          label={`${scraper.sourceLabel} aktiviert`}
+          label={`${scraper.name} aktiviert`}
         />
         <IconButton label="Scraper ausführen" onClick={onRun} disabled={!scraper.enabled}>
           <PlayIcon className="h-3.5 w-3.5" />

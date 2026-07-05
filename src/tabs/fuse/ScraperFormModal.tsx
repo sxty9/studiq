@@ -1,20 +1,20 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import type { Kategorie, Scraper } from '@/types';
-import { KATEGORIEN } from '@/types';
+import type { ScheduleKind, Scraper } from '@/types';
+import { SCRAPER_MODELS } from '@/types';
 import { cn } from '@/lib/cn';
+import { modelLabel } from '@/lib/scrapers';
 import { Button } from '@/ui/Button';
 import { Modal } from '@/ui/Modal';
-import { Segmented } from '@/ui/Segmented';
 import { Toggle } from '@/ui/Toggle';
-import { CheckIcon } from '@/ui/icons';
+import { Dropdown, DropdownItem } from '@/ui/Dropdown';
+import { LayersIcon } from '@/ui/icons';
 
-type Schedule = 'manual' | 'daily' | 'weekly';
-const SCHEDULE_OPTIONS: { value: Schedule; label: string }[] = [
-  { value: 'manual', label: 'Manuell' },
+const SCHEDULE_OPTIONS: { value: ScheduleKind; label: string }[] = [
+  { value: 'manual', label: 'Nur manuell' },
   { value: 'daily', label: 'Täglich' },
   { value: 'weekly', label: 'Wöchentlich' },
+  { value: 'custom', label: 'Benutzerdefiniert' },
 ];
-const asSchedule = (s: string): Schedule => (s === 'daily' || s === 'weekly' ? s : 'manual');
 
 export type ScraperFormValues = Omit<Scraper, 'id' | 'lastRun'>;
 
@@ -30,6 +30,11 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   );
 }
 
+const inputCls = cn(
+  'h-9 w-full rounded-md bg-fill/10 px-3 text-subhead text-text-primary placeholder:text-text-tertiary',
+  'transition focus:outline-none focus:ring-2 focus:ring-accent/50',
+);
+
 export function ScraperFormModal({
   open,
   initial,
@@ -42,28 +47,36 @@ export function ScraperFormModal({
   onClose: () => void;
   onSubmit: (values: ScraperFormValues) => void;
 }) {
-  const [sourceLabel, setSourceLabel] = useState('');
-  const [kategorie, setKategorie] = useState<Kategorie[]>([]);
-  const [schedule, setSchedule] = useState<Schedule>('manual');
+  const [name, setName] = useState('');
+  const [model, setModel] = useState<string>(SCRAPER_MODELS[0].id);
+  const [source, setSource] = useState('');
+  const [scheduleKind, setScheduleKind] = useState<ScheduleKind>('manual');
+  const [scheduleCustom, setScheduleCustom] = useState('');
   const [enabled, setEnabled] = useState(true);
 
   // Re-seed the form whenever it opens (or the target scraper changes).
   useEffect(() => {
     if (!open) return;
-    setSourceLabel(initial?.sourceLabel ?? '');
-    setKategorie(initial?.kategorie ?? []);
-    setSchedule(asSchedule(initial?.schedule ?? 'manual'));
+    setName(initial?.name ?? '');
+    setModel(initial?.model ?? SCRAPER_MODELS[0].id);
+    setSource(initial?.source ?? '');
+    setScheduleKind(initial?.scheduleKind ?? 'manual');
+    setScheduleCustom(initial?.scheduleCustom ?? '');
     setEnabled(initial?.enabled ?? true);
   }, [open, initial]);
 
-  const toggleKategorie = (k: Kategorie) =>
-    setKategorie((cur) => (cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k]));
-
-  const canSave = sourceLabel.trim().length > 0;
+  const canSave = name.trim().length > 0;
 
   const submit = () => {
     if (!canSave) return;
-    onSubmit({ sourceLabel: sourceLabel.trim(), kategorie, schedule, enabled });
+    onSubmit({
+      name: name.trim(),
+      model,
+      source: source.trim(),
+      scheduleKind,
+      scheduleCustom: scheduleKind === 'custom' ? scheduleCustom.trim() : undefined,
+      enabled,
+    });
     onClose();
   };
 
@@ -72,7 +85,7 @@ export function ScraperFormModal({
       open={open}
       onClose={onClose}
       title={initial ? 'Scraper bearbeiten' : 'Scraper hinzufügen'}
-      description="Metadaten der Quelle — echte Scraper laufen separat."
+      description="Metadaten der Quelle — die echten Scraper-Engines folgen separat."
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>
@@ -85,54 +98,89 @@ export function ScraperFormModal({
       }
     >
       <div className="space-y-5">
-        <Field label="Quelle">
+        <Field label="Name">
           <input
             type="text"
-            value={sourceLabel}
-            onChange={(e) => setSourceLabel(e.target.value)}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && submit()}
             placeholder="z. B. Moodle — DM II"
             autoFocus
-            className={cn(
-              'h-9 w-full rounded-md bg-fill/10 px-3 text-subhead text-text-primary placeholder:text-text-tertiary',
-              'transition focus:outline-none focus:ring-2 focus:ring-accent/50',
-            )}
+            className={inputCls}
           />
         </Field>
 
-        <Field label="Kategorien" hint={kategorie.length ? `${kategorie.length} gewählt` : 'was diese Quelle liefert'}>
-          <div className="flex flex-wrap gap-1.5">
-            {KATEGORIEN.map((k) => {
-              const on = kategorie.includes(k);
+        <Field label="Scraper-Modell" hint="Engines folgen">
+          <Dropdown
+            ariaLabel="Scraper-Modell wählen"
+            triggerClassName="h-9 w-full max-w-none justify-between rounded-md bg-fill/10 px-3"
+            trigger={
+              <span className="flex min-w-0 items-center gap-2">
+                <LayersIcon className="h-4 w-4 shrink-0 text-text-tertiary" />
+                <span className="truncate text-subhead">{modelLabel(model)}</span>
+              </span>
+            }
+          >
+            {(dismiss) =>
+              SCRAPER_MODELS.map((m) => (
+                <DropdownItem
+                  key={m.id}
+                  title={m.label}
+                  selected={m.id === model}
+                  onClick={() => {
+                    setModel(m.id);
+                    dismiss();
+                  }}
+                />
+              ))
+            }
+          </Dropdown>
+        </Field>
+
+        <Field label="Quelle" hint="Website oder lokaler Pfad">
+          <input
+            type="text"
+            value={source}
+            onChange={(e) => setSource(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && submit()}
+            placeholder="https://… oder /pfad/zum/ordner"
+            className={cn(inputCls, 'font-mono text-footnote')}
+          />
+        </Field>
+
+        <Field label="Zeitplan">
+          <div className="grid grid-cols-2 gap-1.5">
+            {SCHEDULE_OPTIONS.map((o) => {
+              const on = scheduleKind === o.value;
               return (
                 <button
-                  key={k}
+                  key={o.value}
                   type="button"
                   aria-pressed={on}
-                  onClick={() => toggleKategorie(k)}
+                  onClick={() => setScheduleKind(o.value)}
                   className={cn(
-                    'inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-caption font-medium transition duration-fast ease-out',
+                    'h-9 rounded-md text-footnote font-medium transition duration-fast ease-out',
                     'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50',
                     on
                       ? 'bg-accent/15 text-accent ring-1 ring-inset ring-accent/40'
                       : 'bg-fill/10 text-text-secondary hover:bg-fill/15 hover:text-text-primary',
                   )}
                 >
-                  {on && <CheckIcon className="h-3 w-3" />}
-                  {k}
+                  {o.label}
                 </button>
               );
             })}
           </div>
-        </Field>
-
-        <Field label="Zeitplan">
-          <Segmented<Schedule>
-            options={SCHEDULE_OPTIONS}
-            value={schedule}
-            onChange={setSchedule}
-            ariaLabel="Zeitplan"
-          />
+          {scheduleKind === 'custom' && (
+            <input
+              type="text"
+              value={scheduleCustom}
+              onChange={(e) => setScheduleCustom(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && submit()}
+              placeholder="z. B. alle 6 Stunden · Mo/Do 07:00 · */30 * * * *"
+              className={cn(inputCls, 'mt-2 font-mono text-footnote')}
+            />
+          )}
         </Field>
 
         <div className="flex items-center justify-between rounded-md bg-fill/5 px-3 py-2.5">

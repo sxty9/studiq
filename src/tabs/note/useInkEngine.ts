@@ -57,6 +57,7 @@ export function useInkEngine(
   color: string,
   width: number,
   io: EngineIO,
+  scrollParent?: React.RefObject<HTMLElement | null>,
 ): InkEngine {
   // ── element + context refs ─────────────────────────────────────────────────
   const containerRef = useRef<HTMLDivElement>(null);
@@ -70,8 +71,15 @@ export function useInkEngine(
   const liveStrokeRef = useRef<Stroke | null>(null);
   const undoStackRef = useRef<Op[]>([]);
   const redoStackRef = useRef<Op[]>([]);
-  const penActiveRef = useRef(false);
+  // Once an Apple Pencil / stylus is ever seen, touch contacts stop drawing entirely (palm
+  // rejection). Persists for the session so a resting palm between strokes can't draw either.
+  const penSeenRef = useRef(false);
+  const penDownRef = useRef(false); // a pen is currently in contact (writing)
   const activePointerRef = useRef<number | null>(null);
+  const activeTypeRef = useRef<string | null>(null);
+  // Finger-pan: on a pen device a single finger scrolls the notebook instead of drawing.
+  const scrollPointerRef = useRef<number | null>(null);
+  const lastScrollYRef = useRef(0);
   const rafRef = useRef<number | null>(null);
   const sizeRef = useRef({ w: 0, h: 0 });
 
@@ -212,17 +220,11 @@ export function useInkEngine(
   }, []);
 
   // ── pointer handlers (stable; all mutable inputs come through refs) ──────────
-  const onPointerDown = useCallback(
+  const startDraw = useCallback(
     (e: ReactPointerEvent) => {
-      // Palm rejection: once a pen is down, ignore touch contacts entirely.
-      if (e.pointerType === 'touch' && penActiveRef.current) return;
-      if (e.pointerType === 'mouse' && e.button !== 0) return; // left button only
-      if (activePointerRef.current != null) return; // one active contact at a time
-      if (e.pointerType === 'pen') penActiveRef.current = true;
-
       (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
       activePointerRef.current = e.pointerId;
-
+      activeTypeRef.current = e.pointerType;
       const at = xyOf(e.clientX, e.clientY);
       if (toolRef.current === 'eraser') {
         eraseAt(at);
@@ -241,8 +243,66 @@ export function useInkEngine(
     [eraseAt, scheduleLivePaint, xyOf],
   );
 
+  const onPointerDown = useCallback(
+    (e: ReactPointerEvent) => {
+      if (e.pointerType === 'pen') {
+        penSeenRef.current = true;
+        penDownRef.current = true;
+        scrollPointerRef.current = null; // a starting pen cancels any finger pan
+        // Pen preempts a touch stroke that grabbed the slot before the pen appeared.
+        if (activePointerRef.current != null && activeTypeRef.current === 'touch') {
+          liveStrokeRef.current = null;
+          clearLive();
+          activePointerRef.current = null;
+        }
+        if (activePointerRef.current != null) return;
+        startDraw(e);
+        return;
+      }
+
+      if (e.pointerType === 'mouse') {
+        if (e.button !== 0) return; // left button only
+        if (activePointerRef.current != null) return;
+        startDraw(e);
+        return;
+      }
+
+      // touch
+      const big = e.width > 45 || e.height > 45; // palm heuristic (0/unknown → treated as finger)
+      if (penSeenRef.current) {
+        // Pen device: a single finger PANS the notebook; palm and touches during writing are ignored.
+        if (penDownRef.current || big) return;
+        if (scrollPointerRef.current != null || activePointerRef.current != null) return;
+        scrollPointerRef.current = e.pointerId;
+        lastScrollYRef.current = e.clientY;
+        try {
+          (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+        } catch {
+          /* capture may be unavailable */
+        }
+        return;
+      }
+
+      // Finger-only device (no pen ever seen): touch draws.
+      if (big) return;
+      if (activePointerRef.current != null) return;
+      startDraw(e);
+    },
+    [startDraw, clearLive],
+  );
+
   const onPointerMove = useCallback(
     (e: ReactPointerEvent) => {
+      // Finger pan: translate movement into notebook scroll.
+      if (e.pointerId === scrollPointerRef.current) {
+        const sc = scrollParent?.current;
+        if (sc) {
+          const y = e.clientY;
+          sc.scrollTop -= y - lastScrollYRef.current;
+          lastScrollYRef.current = y;
+        }
+        return;
+      }
       if (e.pointerId !== activePointerRef.current) return;
       if (toolRef.current === 'eraser') {
         eraseAt(xyOf(e.clientX, e.clientY));
@@ -259,19 +319,30 @@ export function useInkEngine(
       }
       scheduleLivePaint();
     },
-    [eraseAt, scheduleLivePaint, xyOf],
+    [eraseAt, scheduleLivePaint, xyOf, scrollParent],
   );
 
   const endStroke = useCallback(
     (e: ReactPointerEvent, commit: boolean) => {
+      // End a finger pan.
+      if (e.pointerId === scrollPointerRef.current) {
+        scrollPointerRef.current = null;
+        try {
+          (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+        } catch {
+          /* capture may already be gone */
+        }
+        return;
+      }
+      if (e.pointerType === 'pen') penDownRef.current = false;
       if (e.pointerId !== activePointerRef.current) return;
       activePointerRef.current = null;
+      activeTypeRef.current = null;
       try {
         (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
       } catch {
         /* capture may already be gone */
       }
-      if (e.pointerType === 'pen') penActiveRef.current = false;
 
       if (rafRef.current != null) {
         cancelAnimationFrame(rafRef.current);

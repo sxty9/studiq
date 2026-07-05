@@ -60,9 +60,28 @@ body,
   background: transparent;
 }
 
-/* The ink surface must swallow pen/touch gestures (no scroll/zoom while drawing). */
+/* studiq is a pen/touch app (iPad-first for the Note tab). A resting palm must never select UI
+   text or trigger iOS's callout menu ("Kopieren / Auswahl suchen / Nachschlagen"). Suppress
+   selection + callout app-wide; form fields opt back in so typing/editing still works. */
+body {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+}
+input,
+textarea,
+[contenteditable='true'],
+[contenteditable=''] {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* The ink surface must swallow pen/touch gestures (no scroll/zoom/callout while drawing). */
 .sq-ink {
   touch-action: none;
   -webkit-user-select: none;
   user-select: none;
+  -webkit-touch-callout: none;
 }

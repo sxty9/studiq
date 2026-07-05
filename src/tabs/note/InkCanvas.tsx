@@ -18,6 +18,7 @@ export function InkCanvas({
   color,
   width,
   onControls,
+  scrollParent,
 }: {
   pageId: string;
   background: PageBackground;
@@ -25,6 +26,8 @@ export function InkCanvas({
   color: string;
   width: number;
   onControls?: (c: InkControls) => void;
+  /** Shared notebook scroll container: a single finger drag pans it (pen draws, palm ignored). */
+  scrollParent?: React.RefObject<HTMLElement | null>;
 }) {
   const { source } = useStudiq();
 
@@ -36,7 +39,7 @@ export function InkCanvas({
     [source],
   );
 
-  const engine = useInkEngine(pageId, background, tool, color, width, { loadStrokes, saveStrokes });
+  const engine = useInkEngine(pageId, background, tool, color, width, { loadStrokes, saveStrokes }, scrollParent);
 
   const { canUndo, canRedo, undo, redo } = engine;
   useEffect(() => {

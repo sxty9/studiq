@@ -46,18 +46,33 @@ export interface Document {
   addedAt: string; // ISO
 }
 
-// ── Scraper — metadata only (real scrapers live in a separate repo). ────────────────────────
+// ── Scraper — metadata only (real scrapers live in a separate repo, implemented later). ─────
 export type ScraperStatus = 'ok' | 'error' | 'never';
 export interface ScraperLastRun {
   at: string; // ISO
   status: ScraperStatus;
   added: number;
 }
+
+// The scraper "models" studiq will ship — placeholders for now (the engines come later).
+export const SCRAPER_MODELS = [
+  { id: 'moodle', label: 'Moodle' },
+  { id: 'ilias', label: 'ILIAS' },
+  { id: 'website', label: 'Website (generisch)' },
+  { id: 'filesystem', label: 'Lokaler Ordner' },
+  { id: 'notion', label: 'Notion' },
+] as const;
+export type ScraperModelId = (typeof SCRAPER_MODELS)[number]['id'];
+
+export type ScheduleKind = 'manual' | 'daily' | 'weekly' | 'custom';
+
 export interface Scraper {
   id: string;
-  sourceLabel: string; // e.g. "Moodle — DM II"
-  kategorie: Kategorie[]; // what this source yields
-  schedule: string; // "manual" | "daily" | "weekly" | free text
+  name: string; // user-given name, e.g. "Moodle — DM II"
+  model: string; // scraper-model id (see SCRAPER_MODELS); real engines land later
+  source: string; // where to scrape: a URL (web) or a local path (desktop/mobile)
+  scheduleKind: ScheduleKind;
+  scheduleCustom?: string; // fine-grained cycle when scheduleKind === 'custom'
   enabled: boolean;
   lastRun?: ScraperLastRun;
 }

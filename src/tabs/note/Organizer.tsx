@@ -3,11 +3,10 @@ import { useStudiq } from '@/state/studiq';
 import { organize, fmtRange, type Perspective } from '@/lib/organize';
 import { cn } from '@/lib/cn';
 import { Button, IconButton } from '@/ui/Button';
-import { Segmented } from '@/ui/Segmented';
 import { Modal } from '@/ui/Modal';
 import { Dropdown, DropdownItem } from '@/ui/Dropdown';
 import { useToast } from '@/ui/Toast';
-import { BookIcon, ClockIcon, PlusIcon } from '@/ui/icons';
+import { BookIcon, ClockIcon, PlusIcon, SwapIcon } from '@/ui/icons';
 import { OrganizerTree } from './OrganizerTree';
 
 /** Left pane: perspective toggle + new-note action over the two-level organizer tree. */
@@ -23,16 +22,9 @@ export function Organizer() {
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface-sidebar">
       <div className="flex shrink-0 items-center gap-2 border-b border-separator px-3 py-2.5">
-        <Segmented<Perspective>
-          ariaLabel="Perspektive"
-          size="sm"
-          value={perspective}
-          onChange={setPerspective}
-          className="flex-1"
-          options={[
-            { value: 'module-session', label: 'Modul → Session' },
-            { value: 'session-module', label: 'Session → Modul' },
-          ]}
+        <PerspectiveSwap
+          perspective={perspective}
+          onSwap={() => setPerspective(perspective === 'module-session' ? 'session-module' : 'module-session')}
         />
         <IconButton label="Neue Notiz" onClick={() => setCreating(true)} className="shrink-0">
           <PlusIcon className="h-4 w-4" />
@@ -44,6 +36,28 @@ export function Organizer() {
       </div>
 
       <NewNoteModal open={creating} onClose={() => setCreating(false)} />
+    </div>
+  );
+}
+
+/** "Modul ⇄ Session": the labels show the current grouping order; the swap button flips it. */
+function PerspectiveSwap({ perspective, onSwap }: { perspective: Perspective; onSwap: () => void }) {
+  const [primary, secondary] = perspective === 'module-session' ? ['Modul', 'Session'] : ['Session', 'Modul'];
+  return (
+    <div className="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-fill/8 px-2 py-1 text-footnote">
+      <span className="min-w-0 flex-1 truncate text-right font-semibold text-text-primary">{primary}</span>
+      <button
+        type="button"
+        onClick={onSwap}
+        aria-label={`Perspektive tauschen — aktuell nach ${primary} gruppiert`}
+        className={cn(
+          'flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-accent transition',
+          'hover:bg-accent/10 active:scale-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50',
+        )}
+      >
+        <SwapIcon className="h-4 w-4" />
+      </button>
+      <span className="min-w-0 flex-1 truncate text-left text-text-secondary">{secondary}</span>
     </div>
   );
 }

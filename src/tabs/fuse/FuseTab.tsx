@@ -96,7 +96,7 @@ export function FuseTab() {
     async (values: ScraperFormValues) => {
       const s = await source.addScraper(values);
       setScrapers((cur) => [...cur, s]);
-      toast({ title: 'Scraper hinzugefügt', description: s.sourceLabel });
+      toast({ title: 'Scraper hinzugefügt', description: s.name });
     },
     [source, toast],
   );

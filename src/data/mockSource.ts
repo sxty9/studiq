@@ -105,9 +105,9 @@ const strokesByPage = new Map<string, Stroke[]>();
 strokesByPage.set(notes[0].pages[0].id, SEED_STROKES);
 
 const scrapers: Scraper[] = [
-  { id: 'sc_moodle', sourceLabel: 'Moodle — DM II', kategorie: ['Foliensatz', 'Übungen'], schedule: 'weekly', enabled: true, lastRun: { at: '2026-06-14T06:00:00Z', status: 'ok', added: 4 } },
-  { id: 'sc_cloud', sourceLabel: 'Uni-Cloud Mitschriften', kategorie: ['Mitschriften'], schedule: 'daily', enabled: false },
-  { id: 'sc_altklausur', sourceLabel: 'Altklausuren-Archiv', kategorie: ['Probeklausuren'], schedule: 'manual', enabled: true },
+  { id: 'sc_moodle', name: 'Moodle — DM II', model: 'moodle', source: 'https://moodle.uni.de/course/dm2', scheduleKind: 'weekly', enabled: true, lastRun: { at: '2026-06-14T06:00:00Z', status: 'ok', added: 4 } },
+  { id: 'sc_cloud', name: 'Uni-Cloud Mitschriften', model: 'filesystem', source: '/Volumes/UniCloud/Mitschriften', scheduleKind: 'custom', scheduleCustom: 'alle 6 Stunden', enabled: false },
+  { id: 'sc_altklausur', name: 'Altklausuren-Archiv', model: 'website', source: 'https://altklausuren.fs.uni.de', scheduleKind: 'manual', enabled: true },
 ];
 
 const documents: Document[] = [
@@ -155,7 +155,7 @@ export const mockSource: DataSource = {
     for (let i = 0; i < count; i++) {
       const [title, kategorie] = FAKE_TITLES[fakeCursor % FAKE_TITLES.length];
       fakeCursor++;
-      const doc: Document = { id: uid('d'), title, kategorie: s.kategorie[0] ?? kategorie, source: 'scraper', scraperId: s.id, addedAt: now() };
+      const doc: Document = { id: uid('d'), title, kategorie, source: 'scraper', scraperId: s.id, addedAt: now() };
       documents.unshift(doc);
       made.push(doc);
     }
