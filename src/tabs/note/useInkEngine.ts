@@ -323,6 +323,26 @@ export function useInkEngine(
         lastScrollYRef.current = y;
         return;
       }
+
+      // Lazy start: on hover-capable iPads the Apple Pencil streams pointermove events while
+      // hovering, and on contact Safari sometimes fires NO pointerdown — it just continues moves
+      // with pressure. Without this, that whole stroke is dropped ("erkennt nicht, dass ich anfange
+      // zu zeichnen"). So a pressured pen move with no active stroke begins one here. pressure>0 (or
+      // the tip-down button bit) means real contact — a hovering pen (pressure 0, buttons 0) can't
+      // trigger it, so no phantom strokes.
+      if (
+        e.pointerType === 'pen' &&
+        activePointerRef.current == null &&
+        liveStrokeRef.current == null &&
+        (e.pressure > 0 || (e.buttons & 1) !== 0)
+      ) {
+        penDownRef.current = true;
+        scrollPointerRef.current = null;
+        scrollActiveRef.current = false;
+        startDraw(e);
+        return;
+      }
+
       if (e.pointerId !== activePointerRef.current) return;
       if (toolRef.current === 'eraser') {
         eraseAt(xyOf(e.clientX, e.clientY));
@@ -339,7 +359,7 @@ export function useInkEngine(
       }
       scheduleLivePaint();
     },
-    [eraseAt, scheduleLivePaint, xyOf, scrollParent],
+    [eraseAt, scheduleLivePaint, xyOf, scrollParent, startDraw],
   );
 
   const endStroke = useCallback(
