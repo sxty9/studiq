@@ -43,6 +43,8 @@ export function Toolbar({
   canRedo,
   onUndo,
   onRedo,
+  onlyPencil,
+  setOnlyPencil,
 }: {
   tool: Tool;
   setTool: (t: Tool) => void;
@@ -56,6 +58,8 @@ export function Toolbar({
   canRedo: boolean;
   onUndo: () => void;
   onRedo: () => void;
+  onlyPencil: boolean;
+  setOnlyPencil: (v: boolean) => void;
 }) {
   const inkDisabled = tool === 'eraser';
 
@@ -132,8 +136,27 @@ export function Toolbar({
         </IconButton>
       </div>
 
-      {/* Background — pushed to the right */}
-      <div className="ml-auto">
+      {/* Only-Pencil mode + background — pushed to the right */}
+      <div className="ml-auto flex items-center gap-2">
+        <button
+          type="button"
+          aria-pressed={onlyPencil}
+          onClick={() => setOnlyPencil(!onlyPencil)}
+          title={
+            onlyPencil
+              ? 'Nur Pencil: schreibt nur mit dem Stift, Finger scrollt das Papier'
+              : 'Finger & Stift schreiben beide; Finger scrollt das Papier nicht'
+          }
+          className={cn(
+            'inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-footnote font-medium transition duration-fast ease-out',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50',
+            onlyPencil
+              ? 'bg-accent/15 text-accent ring-1 ring-inset ring-accent/40'
+              : 'bg-fill/10 text-text-secondary hover:bg-fill/15 hover:text-text-primary',
+          )}
+        >
+          <PenIcon className="h-3.5 w-3.5" /> Nur Pencil
+        </button>
         <Segmented<PageBackground>
           ariaLabel="Seitenhintergrund"
           size="sm"

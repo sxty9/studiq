@@ -10,6 +10,17 @@ import type { InkControls } from './useInkEngine';
 
 const NO_CONTROLS: InkControls = { canUndo: false, canRedo: false, undo: () => {}, redo: () => {} };
 
+// Only-Pencil defaults ON (pencil-only writing + finger scrolls the paper), the clean iPad mode;
+// persisted so the choice survives reloads.
+function readOnlyPencil(): boolean {
+  try {
+    const v = localStorage.getItem('sq.onlyPencil');
+    return v == null ? true : v === '1';
+  } catch {
+    return true;
+  }
+}
+
 /** Right pane: the selected note's pages, tools, and the ink surface — or a tasteful empty state.
  *
  * Pages stack in one vertical scroll column: you flip through them by scrolling (an extra way to
@@ -22,6 +33,15 @@ export function Notebook() {
   const [tool, setTool] = useState<Tool>('pen');
   const [color, setColor] = useState('#e8e8ec');
   const [width, setWidth] = useState(3.5);
+  const [onlyPencil, setOnlyPencilState] = useState(readOnlyPencil);
+  const setOnlyPencil = useCallback((v: boolean) => {
+    setOnlyPencilState(v);
+    try {
+      localStorage.setItem('sq.onlyPencil', v ? '1' : '0');
+    } catch {
+      /* ignore */
+    }
+  }, []);
   // No DataSource seam persists page background yet, so we hold session-local overrides here.
   const [bgOverrides, setBgOverrides] = useState<Record<string, PageBackground>>({});
   const [controlsByPage, setControlsByPage] = useState<Record<string, InkControls>>({});
@@ -163,6 +183,8 @@ export function Notebook() {
         canRedo={ctrls.canRedo}
         onUndo={ctrls.undo}
         onRedo={ctrls.redo}
+        onlyPencil={onlyPencil}
+        setOnlyPencil={setOnlyPencil}
       />
 
       <div ref={scrollRef} onScroll={onScroll} className="dl-scroll min-h-0 flex-1 overflow-y-auto overscroll-contain">
@@ -177,6 +199,7 @@ export function Notebook() {
               tool={tool}
               color={color}
               width={width}
+              onlyPencil={onlyPencil}
               register={register}
               setControls={setControlsFor}
               scrollParent={scrollRef}
@@ -209,6 +232,7 @@ const PageSheet = memo(function PageSheet({
   tool,
   color,
   width,
+  onlyPencil,
   register,
   setControls,
   scrollParent,
@@ -220,6 +244,7 @@ const PageSheet = memo(function PageSheet({
   tool: Tool;
   color: string;
   width: number;
+  onlyPencil: boolean;
   register: (id: string, el: HTMLDivElement | null) => void;
   setControls: (id: string, c: InkControls) => void;
   scrollParent: React.RefObject<HTMLElement | null>;
@@ -249,6 +274,7 @@ const PageSheet = memo(function PageSheet({
         tool={tool}
         color={color}
         width={width}
+        onlyPencil={onlyPencil}
         onControls={onControls}
         scrollParent={scrollParent}
       />
