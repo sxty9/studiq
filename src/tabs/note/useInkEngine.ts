@@ -389,7 +389,10 @@ export function useInkEngine(
   );
 
   const onPointerUp = useCallback((e: ReactPointerEvent) => endStroke(e, true), [endStroke]);
-  const onPointerCancel = useCallback((e: ReactPointerEvent) => endStroke(e, false), [endStroke]);
+  // Commit on cancel too: iOS can fire pointercancel on the pen if a stray palm touch starts a
+  // browser gesture. Discarding would make a pen stroke silently vanish ("es kommt nichts") — so
+  // we keep whatever was drawn instead of losing it.
+  const onPointerCancel = useCallback((e: ReactPointerEvent) => endStroke(e, true), [endStroke]);
 
   // ── sizing: DPR-aware, re-run on container resize ────────────────────────────
   useEffect(() => {

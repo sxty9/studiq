@@ -187,7 +187,10 @@ export function Notebook() {
         setOnlyPencil={setOnlyPencil}
       />
 
-      <div ref={scrollRef} onScroll={onScroll} className="dl-scroll min-h-0 flex-1 overflow-y-auto overscroll-contain">
+      {/* touch-none: the whole column swallows native touch gestures so a resting palm can never
+          start a browser scroll that would fire pointercancel and kill the pen stroke. Finger-pan
+          (Only-Pencil mode) is done in JS on the canvas; wheel/trackpad scrolling is unaffected. */}
+      <div ref={scrollRef} onScroll={onScroll} className="dl-scroll min-h-0 flex-1 touch-none overflow-y-auto overscroll-contain">
         <div className="mx-auto flex w-full max-w-3xl flex-col items-center gap-5 px-3 py-4 sm:px-6">
           {pages.map((p, i) => (
             <PageSheet
