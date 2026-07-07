@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import type { PageBackground, Stroke, Tool } from '@/types';
 import { useStudiq } from '@/state/studiq';
 import { useInkEngine, type InkControls } from './useInkEngine';
@@ -42,7 +42,8 @@ export function InkCanvas({
     [source],
   );
 
-  const engine = useInkEngine(pageId, background, tool, color, width, { loadStrokes, saveStrokes }, scrollParent, onlyPencil);
+  const hoverRef = useRef<HTMLDivElement>(null);
+  const engine = useInkEngine(pageId, background, tool, color, width, { loadStrokes, saveStrokes }, scrollParent, onlyPencil, hoverRef);
 
   const { canUndo, canRedo, undo, redo } = engine;
   useEffect(() => {
@@ -67,7 +68,11 @@ export function InkCanvas({
         onPointerMove={engine.onPointerMove}
         onPointerUp={engine.onPointerUp}
         onPointerCancel={engine.onPointerCancel}
+        onPointerLeave={engine.onPointerLeave}
       />
+      {/* Hover preview: a nib ring that follows the floating Pencil. Positioned + shown/hidden
+          imperatively by the engine (via transform) so hover moves never re-render React. */}
+      <div ref={hoverRef} aria-hidden className="pointer-events-none absolute left-0 top-0 rounded-full border-2" style={{ display: 'none' }} />
     </div>
   );
 }

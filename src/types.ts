@@ -88,7 +88,8 @@ export interface ScraperRun {
 export interface Pt {
   x: number;
   y: number;
-  p: number;
+  p: number; // pressure 0..1
+  t?: number; // pen "flatness" 0..1 from tilt (1 = pencil laid flat) → shading; absent = upright
 }
 export type Tool = 'pen' | 'highlighter' | 'eraser';
 export type StrokeTool = 'pen' | 'highlighter'; // a committed stroke is never an eraser

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import type { PageBackground, Stroke, StrokeTool, Tool } from '@/types';
 import { uid } from '@/lib/id';
-import { drawBackground, drawStroke, hitStroke, type Vec } from '@/lib/ink';
+import { drawBackground, drawEraseHighlight, drawStroke, hitStroke, type Vec } from '@/lib/ink';
 
 /* ─────────────────────────────────────────────────────────────────────────────
  * The latency-critical core of the Note tab.
@@ -25,6 +25,26 @@ const ERASE_TOL = 6; // extra CSS-px slack around a stroke for the eraser hit-te
 const PALM_SIZE = 45; // touch contacts wider/taller than this (CSS px) are treated as a palm
 const SCROLL_THRESHOLD = 8; // a finger must move this far before it starts panning (vs. a resting palm)
 const SCROLL_COOLDOWN = 350; // ms after a pen lift during which touches never pan (safe micro-lifts)
+const HL_RING = 2.2; // hover-ring diameter factor for the highlighter (mirrors ink.ts HL_SCALE)
+
+/** #rrggbb → rgba() with the given alpha (for the hover ring's faint fill). */
+function hexA(hex: string, a: number): string {
+  const h = hex.replace('#', '');
+  const s = h.length === 3 ? h.split('').map((c) => c + c).join('') : h;
+  const n = parseInt(s, 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+}
+
+/** Pen "flatness" 0..1 from tilt (1 = pencil laid flat). Prefers altitudeAngle, falls back to tilt. */
+function tiltFlatness(e: { tiltX: number; tiltY: number }): number {
+  const alt = (e as unknown as { altitudeAngle?: number }).altitudeAngle;
+  if (typeof alt === 'number' && alt > 0) {
+    const f = 1 - alt / (Math.PI / 2);
+    return f < 0 ? 0 : f > 1 ? 1 : f;
+  }
+  const mag = Math.hypot(e.tiltX || 0, e.tiltY || 0); // degrees; ~65° ≈ quite flat
+  return Math.min(1, mag / 65);
+}
 const GRID_COLOR = 'rgba(235, 235, 245, 0.10)'; // subtle rule lines on the dark paper
 
 type Op = { type: 'add'; stroke: Stroke } | { type: 'erase'; strokes: Stroke[] };
@@ -44,6 +64,7 @@ export interface InkEngine extends InkControls {
   onPointerMove: (e: ReactPointerEvent) => void;
   onPointerUp: (e: ReactPointerEvent) => void;
   onPointerCancel: (e: ReactPointerEvent) => void;
+  onPointerLeave: (e: ReactPointerEvent) => void;
 }
 
 interface EngineIO {
@@ -62,6 +83,7 @@ export function useInkEngine(
   io: EngineIO,
   scrollParent: React.RefObject<HTMLElement | null> | undefined,
   onlyPencil: boolean,
+  hoverRef: React.RefObject<HTMLDivElement | null> | undefined,
 ): InkEngine {
   // ── element + context refs ─────────────────────────────────────────────────
   const containerRef = useRef<HTMLDivElement>(null);
@@ -86,6 +108,7 @@ export function useInkEngine(
   const scrollStartYRef = useRef(0);
   const lastScrollYRef = useRef(0);
   const penUpAtRef = useRef(0); // performance.now() of the last pen lift (scroll cooldown)
+  const eraseHoverIdRef = useRef<string | null>(null); // stroke currently previewed for erase (hover)
   const rafRef = useRef<number | null>(null);
   const sizeRef = useRef({ w: 0, h: 0 });
 
@@ -227,6 +250,69 @@ export function useInkEngine(
     return { x: clientX - r.left, y: clientY - r.top };
   }, []);
 
+  // ── hover preview: a nib ring that follows the floating Pencil (Procreate-style) ─────
+  const hideHoverRing = useCallback(() => {
+    const el = hoverRef?.current;
+    if (el) el.style.display = 'none';
+  }, [hoverRef]);
+
+  const updateHoverRing = useCallback(
+    (clientX: number, clientY: number) => {
+      const el = hoverRef?.current;
+      const cont = containerRef.current;
+      if (!el || !cont) return;
+      const r = cont.getBoundingClientRect();
+      const tool = toolRef.current;
+      const eraser = tool === 'eraser';
+      const d = eraser
+        ? ERASE_TOL * 2 + 16
+        : tool === 'highlighter'
+          ? Math.max(widthRef.current * HL_RING, 8)
+          : Math.max(widthRef.current, 6);
+      el.style.width = `${d}px`;
+      el.style.height = `${d}px`;
+      el.style.transform = `translate(${clientX - r.left}px, ${clientY - r.top}px) translate(-50%, -50%)`;
+      el.style.borderColor = eraser ? 'rgba(235, 235, 245, 0.7)' : colorRef.current;
+      el.style.borderStyle = eraser ? 'dashed' : 'solid';
+      el.style.background = eraser ? 'transparent' : hexA(colorRef.current, 0.14);
+      el.style.display = 'block';
+    },
+    [hoverRef],
+  );
+
+  // ── eraser hover: highlight (in red) the stroke a tap would delete ───────────
+  const clearEraseHover = useCallback(() => {
+    if (eraseHoverIdRef.current == null) return;
+    eraseHoverIdRef.current = null;
+    clearLive();
+  }, [clearLive]);
+
+  const updateEraseHover = useCallback(
+    (clientX: number, clientY: number) => {
+      const ctx = liveCtxRef.current;
+      const cont = containerRef.current;
+      if (!ctx || !cont) return;
+      const r = cont.getBoundingClientRect();
+      const pt: Vec = { x: clientX - r.left, y: clientY - r.top };
+      const strokes = committedRef.current;
+      let hitId: string | null = null;
+      for (let i = strokes.length - 1; i >= 0; i--) {
+        if (hitStroke(pt, strokes[i], ERASE_TOL)) {
+          hitId = strokes[i].id;
+          break;
+        }
+      }
+      if (hitId === eraseHoverIdRef.current) return; // unchanged → no repaint
+      eraseHoverIdRef.current = hitId;
+      clearLive();
+      if (hitId) {
+        const s = strokes.find((x) => x.id === hitId);
+        if (s) drawEraseHighlight(ctx, s);
+      }
+    },
+    [clearLive],
+  );
+
   // ── pointer handlers (stable; all mutable inputs come through refs) ──────────
   const startDraw = useCallback(
     (e: ReactPointerEvent) => {
@@ -248,7 +334,7 @@ export function useInkEngine(
         tool: strokeTool,
         color: colorRef.current,
         width: widthRef.current,
-        points: [{ x: at.x, y: at.y, p: e.pressure > 0 ? e.pressure : 0.5 }],
+        points: [{ x: at.x, y: at.y, p: e.pressure > 0 ? e.pressure : 0.5, t: tiltFlatness(e) }],
       };
       scheduleLivePaint();
     },
@@ -257,6 +343,8 @@ export function useInkEngine(
 
   const onPointerDown = useCallback(
     (e: ReactPointerEvent) => {
+      hideHoverRing();
+      clearEraseHover();
       if (e.pointerType === 'pen') {
         penDownRef.current = true;
         // The pen ALWAYS wins: abandon any pending finger-pan or stray active contact and draw.
@@ -300,7 +388,7 @@ export function useInkEngine(
       if (activePointerRef.current != null) return;
       startDraw(e);
     },
-    [startDraw, clearLive],
+    [startDraw, clearLive, hideHoverRing, clearEraseHover],
   );
 
   const onPointerMove = useCallback(
@@ -324,21 +412,23 @@ export function useInkEngine(
         return;
       }
 
-      // Lazy start: on hover-capable iPads the Apple Pencil streams pointermove events while
-      // hovering, and on contact Safari sometimes fires NO pointerdown — it just continues moves
-      // with pressure. Without this, that whole stroke is dropped ("erkennt nicht, dass ich anfange
-      // zu zeichnen"). So a pressured pen move with no active stroke begins one here. pressure>0 (or
-      // the tip-down button bit) means real contact — a hovering pen (pressure 0, buttons 0) can't
-      // trigger it, so no phantom strokes.
-      if (
-        e.pointerType === 'pen' &&
-        activePointerRef.current == null &&
-        liveStrokeRef.current == null &&
-        (e.pressure > 0 || (e.buttons & 1) !== 0)
-      ) {
+      // A pen with no active stroke: either HOVERING (show the nib preview / eraser target) or a
+      // fresh CONTACT. On hover-capable iPads the Pencil streams moves while floating and on contact
+      // Safari sometimes fires NO pointerdown — so a pressured move (pressure>0 or tip-down button)
+      // lazy-starts the stroke here; a floating pen (pressure 0) only drives the hover preview.
+      if (e.pointerType === 'pen' && activePointerRef.current == null) {
+        const contact = e.pressure > 0 || (e.buttons & 1) !== 0;
+        if (!contact) {
+          updateHoverRing(e.clientX, e.clientY);
+          if (toolRef.current === 'eraser') updateEraseHover(e.clientX, e.clientY);
+          else clearEraseHover();
+          return;
+        }
         penDownRef.current = true;
         scrollPointerRef.current = null;
         scrollActiveRef.current = false;
+        hideHoverRing();
+        clearEraseHover();
         startDraw(e);
         return;
       }
@@ -355,11 +445,11 @@ export function useInkEngine(
       const batch = coalesced && coalesced.length ? coalesced : [e.nativeEvent];
       for (let i = 0; i < batch.length; i++) {
         const ev = batch[i];
-        live.points.push({ x: ev.clientX - r.left, y: ev.clientY - r.top, p: ev.pressure > 0 ? ev.pressure : 0.5 });
+        live.points.push({ x: ev.clientX - r.left, y: ev.clientY - r.top, p: ev.pressure > 0 ? ev.pressure : 0.5, t: tiltFlatness(ev) });
       }
       scheduleLivePaint();
     },
-    [eraseAt, scheduleLivePaint, xyOf, scrollParent, startDraw],
+    [eraseAt, scheduleLivePaint, xyOf, scrollParent, startDraw, updateHoverRing, updateEraseHover, clearEraseHover, hideHoverRing],
   );
 
   const endStroke = useCallback(
@@ -413,6 +503,16 @@ export function useInkEngine(
   // browser gesture. Discarding would make a pen stroke silently vanish ("es kommt nichts") — so
   // we keep whatever was drawn instead of losing it.
   const onPointerCancel = useCallback((e: ReactPointerEvent) => endStroke(e, true), [endStroke]);
+
+  // Pen left the hover range (or pointer left the surface): drop the nib ring + erase preview.
+  const onPointerLeave = useCallback(
+    (e: ReactPointerEvent) => {
+      if (e.pointerId === activePointerRef.current) return; // mid-stroke (captured) → ignore
+      hideHoverRing();
+      clearEraseHover();
+    },
+    [hideHoverRing, clearEraseHover],
+  );
 
   // ── sizing: DPR-aware, re-run on container resize ────────────────────────────
   useEffect(() => {
@@ -488,6 +588,7 @@ export function useInkEngine(
     onPointerMove,
     onPointerUp,
     onPointerCancel,
+    onPointerLeave,
     canUndo: undoCount > 0,
     canRedo: redoCount > 0,
     undo,
