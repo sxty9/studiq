@@ -91,6 +91,13 @@ export function useInkEngine(
   const liveRef = useRef<HTMLCanvasElement>(null);
   const baseCtxRef = useRef<CanvasRenderingContext2D | null>(null);
   const liveCtxRef = useRef<CanvasRenderingContext2D | null>(null);
+  // Cached container rect. Calling getBoundingClientRect() in the pointer path forces a synchronous
+  // document layout on EVERY move (≈120 Hz on ProMotion) → main-thread stalls. We keep the rect
+  // cached and refresh it only on resize/scroll/stroke-start, so moves never trigger layout.
+  const rectRef = useRef<DOMRect | null>(null);
+  // rAF coalescing for hover work (ring + eraser preview) → at most one update per frame.
+  const hoverRafRef = useRef<number | null>(null);
+  const hoverPendingRef = useRef<{ x: number; y: number } | null>(null);
 
   // ── stroke + history state (refs — never triggers a render) ─────────────────
   const committedRef = useRef<Stroke[]>([]);
@@ -245,10 +252,25 @@ export function useInkEngine(
   );
 
   // ── pointer geometry (context is already DPR-scaled → work in CSS px) ────────
-  const xyOf = useCallback((clientX: number, clientY: number): Vec => {
-    const r = containerRef.current!.getBoundingClientRect();
-    return { x: clientX - r.left, y: clientY - r.top };
+  // Refresh the cached container rect (only on resize / scroll / stroke-start — never per move).
+  const refreshRect = useCallback(() => {
+    const c = containerRef.current;
+    if (c) rectRef.current = c.getBoundingClientRect();
   }, []);
+
+  // Cached rect for the hot path; computes once if the cache is somehow empty.
+  const rectNow = useCallback((): DOMRect => {
+    if (!rectRef.current && containerRef.current) rectRef.current = containerRef.current.getBoundingClientRect();
+    return rectRef.current ?? new DOMRect();
+  }, []);
+
+  const xyOf = useCallback(
+    (clientX: number, clientY: number): Vec => {
+      const r = rectNow();
+      return { x: clientX - r.left, y: clientY - r.top };
+    },
+    [rectNow],
+  );
 
   // ── hover preview: a nib ring that follows the floating Pencil (Procreate-style) ─────
   const hideHoverRing = useCallback(() => {
@@ -259,9 +281,8 @@ export function useInkEngine(
   const updateHoverRing = useCallback(
     (clientX: number, clientY: number) => {
       const el = hoverRef?.current;
-      const cont = containerRef.current;
-      if (!el || !cont) return;
-      const r = cont.getBoundingClientRect();
+      if (!el) return;
+      const r = rectNow();
       const tool = toolRef.current;
       const eraser = tool === 'eraser';
       const d = eraser
@@ -277,7 +298,7 @@ export function useInkEngine(
       el.style.background = eraser ? 'transparent' : hexA(colorRef.current, 0.14);
       el.style.display = 'block';
     },
-    [hoverRef],
+    [hoverRef, rectNow],
   );
 
   // ── eraser hover: highlight (in red) the stroke a tap would delete ───────────
@@ -290,9 +311,8 @@ export function useInkEngine(
   const updateEraseHover = useCallback(
     (clientX: number, clientY: number) => {
       const ctx = liveCtxRef.current;
-      const cont = containerRef.current;
-      if (!ctx || !cont) return;
-      const r = cont.getBoundingClientRect();
+      if (!ctx) return;
+      const r = rectNow();
       const pt: Vec = { x: clientX - r.left, y: clientY - r.top };
       const strokes = committedRef.current;
       let hitId: string | null = null;
@@ -310,8 +330,33 @@ export function useInkEngine(
         if (s) drawEraseHighlight(ctx, s);
       }
     },
-    [clearLive],
+    [clearLive, rectNow],
   );
+
+  // Coalesce hover work (ring + eraser preview) into one rAF tick per frame.
+  const scheduleHover = useCallback(
+    (clientX: number, clientY: number) => {
+      hoverPendingRef.current = { x: clientX, y: clientY };
+      if (hoverRafRef.current != null) return;
+      hoverRafRef.current = requestAnimationFrame(() => {
+        hoverRafRef.current = null;
+        const pt = hoverPendingRef.current;
+        if (!pt) return;
+        updateHoverRing(pt.x, pt.y);
+        if (toolRef.current === 'eraser') updateEraseHover(pt.x, pt.y);
+        else clearEraseHover();
+      });
+    },
+    [updateHoverRing, updateEraseHover, clearEraseHover],
+  );
+
+  const cancelHover = useCallback(() => {
+    if (hoverRafRef.current != null) {
+      cancelAnimationFrame(hoverRafRef.current);
+      hoverRafRef.current = null;
+    }
+    hoverPendingRef.current = null;
+  }, []);
 
   // ── pointer handlers (stable; all mutable inputs come through refs) ──────────
   const startDraw = useCallback(
@@ -343,8 +388,10 @@ export function useInkEngine(
 
   const onPointerDown = useCallback(
     (e: ReactPointerEvent) => {
+      cancelHover();
       hideHoverRing();
       clearEraseHover();
+      refreshRect(); // one layout read at stroke start; moves then reuse the cache
       if (e.pointerType === 'pen') {
         penDownRef.current = true;
         // The pen ALWAYS wins: abandon any pending finger-pan or stray active contact and draw.
@@ -388,7 +435,7 @@ export function useInkEngine(
       if (activePointerRef.current != null) return;
       startDraw(e);
     },
-    [startDraw, clearLive, hideHoverRing, clearEraseHover],
+    [startDraw, clearLive, hideHoverRing, clearEraseHover, cancelHover, refreshRect],
   );
 
   const onPointerMove = useCallback(
@@ -419,16 +466,16 @@ export function useInkEngine(
       if (e.pointerType === 'pen' && activePointerRef.current == null) {
         const contact = e.pressure > 0 || (e.buttons & 1) !== 0;
         if (!contact) {
-          updateHoverRing(e.clientX, e.clientY);
-          if (toolRef.current === 'eraser') updateEraseHover(e.clientX, e.clientY);
-          else clearEraseHover();
+          scheduleHover(e.clientX, e.clientY); // coalesced to one rAF/frame; no layout per move
           return;
         }
         penDownRef.current = true;
         scrollPointerRef.current = null;
         scrollActiveRef.current = false;
+        cancelHover();
         hideHoverRing();
         clearEraseHover();
+        refreshRect();
         startDraw(e);
         return;
       }
@@ -440,7 +487,7 @@ export function useInkEngine(
       }
       const live = liveStrokeRef.current;
       if (!live) return;
-      const r = containerRef.current!.getBoundingClientRect();
+      const r = rectNow(); // cached — no per-move layout
       const coalesced = e.nativeEvent.getCoalescedEvents?.();
       const batch = coalesced && coalesced.length ? coalesced : [e.nativeEvent];
       for (let i = 0; i < batch.length; i++) {
@@ -449,7 +496,7 @@ export function useInkEngine(
       }
       scheduleLivePaint();
     },
-    [eraseAt, scheduleLivePaint, xyOf, scrollParent, startDraw, updateHoverRing, updateEraseHover, clearEraseHover, hideHoverRing],
+    [eraseAt, scheduleLivePaint, xyOf, scrollParent, startDraw, scheduleHover, cancelHover, hideHoverRing, clearEraseHover, refreshRect, rectNow],
   );
 
   const endStroke = useCallback(
@@ -508,10 +555,11 @@ export function useInkEngine(
   const onPointerLeave = useCallback(
     (e: ReactPointerEvent) => {
       if (e.pointerId === activePointerRef.current) return; // mid-stroke (captured) → ignore
+      cancelHover();
       hideHoverRing();
       clearEraseHover();
     },
-    [hideHoverRing, clearEraseHover],
+    [cancelHover, hideHoverRing, clearEraseHover],
   );
 
   // ── sizing: DPR-aware, re-run on container resize ────────────────────────────
@@ -521,6 +569,7 @@ export function useInkEngine(
 
     const resize = () => {
       const rect = container.getBoundingClientRect();
+      rectRef.current = rect; // keep the hot-path cache fresh
       const dpr = window.devicePixelRatio || 1;
       sizeRef.current = { w: rect.width, h: rect.height };
       const canvases = [baseRef.current, liveRef.current];
@@ -543,6 +592,19 @@ export function useInkEngine(
     ro.observe(container);
     return () => ro.disconnect();
   }, [redrawBase, scheduleLivePaint]);
+
+  // Scrolling moves the sheet (rect.top changes) but doesn't resize it, so refresh the cached rect
+  // on scroll + window resize. This is the only place (besides stroke-start) that reads layout.
+  useEffect(() => {
+    const sc = scrollParent?.current;
+    const onChange = () => refreshRect();
+    sc?.addEventListener('scroll', onChange, { passive: true });
+    window.addEventListener('resize', onChange);
+    return () => {
+      sc?.removeEventListener('scroll', onChange);
+      window.removeEventListener('resize', onChange);
+    };
+  }, [scrollParent, refreshRect]);
 
   // ── page load: flush the outgoing page, load the incoming one, reset history ─
   useEffect(() => {
@@ -576,6 +638,7 @@ export function useInkEngine(
   useEffect(() => {
     return () => {
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+      if (hoverRafRef.current != null) cancelAnimationFrame(hoverRafRef.current);
       flushSave();
     };
   }, [flushSave]);
