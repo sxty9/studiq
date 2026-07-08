@@ -70,9 +70,15 @@ export function InkCanvas({
         onPointerCancel={engine.onPointerCancel}
         onPointerLeave={engine.onPointerLeave}
       />
-      {/* Hover preview: a nib ring that follows the floating Pencil. Positioned + shown/hidden
-          imperatively by the engine (via transform) so hover moves never re-render React. */}
-      <div ref={hoverRef} aria-hidden className="pointer-events-none absolute left-0 top-0 rounded-full border-2" style={{ display: 'none' }} />
+      {/* Hover preview: a nib ring that follows the floating Pencil. Its own GPU layer
+          (will-change:transform) so per-frame transform updates composite OVER the canvas without
+          forcing iOS Safari to re-rasterise the large canvas beneath it. */}
+      <div
+        ref={hoverRef}
+        aria-hidden
+        className="pointer-events-none absolute left-0 top-0 rounded-full border-2"
+        style={{ display: 'none', willChange: 'transform' }}
+      />
     </div>
   );
 }

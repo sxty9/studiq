@@ -1,9 +1,12 @@
 import { StudiqProvider, useStudiq } from '@/state/studiq';
 import { ToastProvider } from '@/ui/Toast';
 import { TopBar } from '@/shell/TopBar';
+import { PerfHud } from '@/shell/PerfHud';
 import { FuseTab } from '@/tabs/fuse/FuseTab';
 import { NoteTab } from '@/tabs/note/NoteTab';
 import { LearnTab } from '@/tabs/learn/LearnTab';
+
+const SHOW_PERF = typeof location !== 'undefined' && /[?&]perf/.test(location.search);
 
 function ActiveTab() {
   const { activeTab } = useStudiq();
@@ -28,6 +31,7 @@ export default function App() {
             <ActiveTab />
           </main>
         </div>
+        {SHOW_PERF && <PerfHud />}
       </ToastProvider>
     </StudiqProvider>
   );

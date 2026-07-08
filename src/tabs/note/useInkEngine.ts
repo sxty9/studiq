@@ -98,6 +98,8 @@ export function useInkEngine(
   // rAF coalescing for hover work (ring + eraser preview) → at most one update per frame.
   const hoverRafRef = useRef<number | null>(null);
   const hoverPendingRef = useRef<{ x: number; y: number } | null>(null);
+  // Last size/tool/colour written to the hover ring, so per-frame we touch ONLY transform.
+  const ringStateRef = useRef({ d: -1, tool: '', color: '' });
 
   // ── stroke + history state (refs — never triggers a render) ─────────────────
   const committedRef = useRef<Stroke[]>([]);
@@ -290,13 +292,23 @@ export function useInkEngine(
         : tool === 'highlighter'
           ? Math.max(widthRef.current * HL_RING, 8)
           : Math.max(widthRef.current, 6);
-      el.style.width = `${d}px`;
-      el.style.height = `${d}px`;
-      el.style.transform = `translate(${clientX - r.left}px, ${clientY - r.top}px) translate(-50%, -50%)`;
-      el.style.borderColor = eraser ? 'rgba(235, 235, 245, 0.7)' : colorRef.current;
-      el.style.borderStyle = eraser ? 'dashed' : 'solid';
-      el.style.background = eraser ? 'transparent' : hexA(colorRef.current, 0.14);
-      el.style.display = 'block';
+      // Only rewrite size/colour when they actually change (rare). Doing it every frame would
+      // dirty layout/paint and force iOS Safari to re-rasterise the huge canvas beneath the ring —
+      // the on-device freeze. Per frame we touch ONLY the (compositor-only) transform.
+      const st = ringStateRef.current;
+      const color = colorRef.current;
+      if (st.d !== d || st.tool !== tool || st.color !== color) {
+        el.style.width = `${d}px`;
+        el.style.height = `${d}px`;
+        el.style.borderColor = eraser ? 'rgba(235, 235, 245, 0.7)' : color;
+        el.style.borderStyle = eraser ? 'dashed' : 'solid';
+        el.style.background = eraser ? 'transparent' : hexA(color, 0.14);
+        st.d = d;
+        st.tool = tool;
+        st.color = color;
+      }
+      el.style.transform = `translate3d(${clientX - r.left}px, ${clientY - r.top}px, 0) translate(-50%, -50%)`;
+      if (el.style.display !== 'block') el.style.display = 'block';
     },
     [hoverRef, rectNow],
   );
