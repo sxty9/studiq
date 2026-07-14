@@ -60,14 +60,15 @@ export function InkCanvas({
     >
       {/* BASE: background + committed ink. Never receives pointer events. */}
       <canvas ref={engine.baseRef} className="sq-ink pointer-events-none absolute inset-0 h-full w-full" />
-      {/* LIVE: in-progress stroke only; the interactive layer. */}
+      {/* LIVE: in-progress stroke only; the interactive layer. Only stroke START, hover and the
+          finger-pan are bound here — once a stroke is live, window listeners inside the engine carry
+          its moves and its lift, so a pen that strays off this element (page gap, rounded corner)
+          can never take its pointerup somewhere we cannot hear it. */}
       <canvas
         ref={engine.liveRef}
         className={`sq-ink absolute inset-0 h-full w-full touch-none select-none ${cursor}`}
         onPointerDown={engine.onPointerDown}
         onPointerMove={engine.onPointerMove}
-        onPointerUp={engine.onPointerUp}
-        onPointerCancel={engine.onPointerCancel}
         onPointerLeave={engine.onPointerLeave}
       />
       {/* Hover preview: a nib ring that follows the floating Pencil. Its own GPU layer

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import type { PageBackground, Stroke, StrokeTool, Tool } from '@/types';
 import { uid } from '@/lib/id';
-import { drawBackground, drawEraseHighlight, drawStroke, hitStroke, type Vec } from '@/lib/ink';
+import { drawBackground, drawEraseHighlight, drawLiveTail, drawStroke, hitStroke, startLive, type LiveInk, type Vec } from '@/lib/ink';
+import { inkDiag } from '@/lib/inkDiag';
 
 /* ─────────────────────────────────────────────────────────────────────────────
  * The latency-critical core of the Note tab.
@@ -15,8 +16,37 @@ import { drawBackground, drawEraseHighlight, drawStroke, hitStroke, type Vec } f
  * Two stacked canvases:
  *   • BASE  — background + all committed strokes. Redrawn wholesale only on load/resize/erase/
  *             undo/redo; a freshly committed stroke is blitted onto it in O(1).
- *   • LIVE  — the single in-progress stroke, cleared and repainted at most once per animation
- *             frame (pointermoves are coalesced into one rAF paint).
+ *   • LIVE  — the single in-progress stroke, painted APPEND-ONLY straight from the pointer handler.
+ *
+ * ── Why the iPad used to eat strokes (and why this file is built the way it is) ───────────────
+ * Two structural faults, each of which alone loses a stroke:
+ *
+ *  1. A ONE-WAY LATCH on the active pointer. `activePointerRef` could only ever be cleared by a
+ *     pointerup whose id matched, and the one piece of self-healing code lived in `onPointerDown`
+ *     — the handler iPadOS demonstrably does NOT fire when the Pencil goes hover→contact. So a
+ *     single dropped pointerup wedged the page for good: every later move fell through the id
+ *     guard, which meant no ink AND no hover-ring update (the ring froze exactly where it was —
+ *     the user's headline symptom). Because the latch state cannot change mid-stroke, the failure
+ *     was necessarily all-or-nothing: a partial stroke was structurally impossible.
+ *
+ *     Dropped pointerups are not hypothetical here. `setPointerCapture()` is specified to RETURN
+ *     SILENTLY (not throw) when the pointer is not in the active buttons state — which is precisely
+ *     the hover→contact state that forced the lazy-start to exist. So lazy-started strokes ran
+ *     UNCAPTURED, and their pointerup was delivered to whatever element the pen happened to be over
+ *     (a page gap, a rounded corner, another sheet). The try/catch around it caught nothing.
+ *
+ *     Fixed by construction: pointer ownership is now UNLATCHABLE. Stroke end is a single
+ *     id-addressed `endStroke(id)` reachable from four independent directions — window pointerup,
+ *     window pointercancel, lostpointercapture, and a watchdog — and any fresh pen contact PREEMPTS
+ *     a stale owner instead of being ignored by it. Routing no longer depends on pointer capture at
+ *     all: while a stroke is live, window-level listeners carry it, so it does not matter one bit
+ *     which element the UA hit-tests.
+ *
+ *  2. INK GATED ON A FRAME. The live stroke was only ever painted inside a rAF callback, and the
+ *     scheduler early-returned while one was pending. A frame iOS declined to deliver therefore
+ *     meant nothing was drawn at all — and at lift the whole stroke was blitted onto the base layer
+ *     in one shot. Now ink is stroked synchronously in the pointer handler, append-only, with no
+ *     full-canvas clear (see drawLiveTail in lib/ink.ts). Ink cannot be starved by the compositor.
  * ────────────────────────────────────────────────────────────────────────── */
 
 const MAX_HISTORY = 100;
@@ -26,6 +56,12 @@ const PALM_SIZE = 45; // touch contacts wider/taller than this (CSS px) are trea
 const SCROLL_THRESHOLD = 8; // a finger must move this far before it starts panning (vs. a resting palm)
 const SCROLL_COOLDOWN = 350; // ms after a pen lift during which touches never pan (safe micro-lifts)
 const HL_RING = 2.2; // hover-ring diameter factor for the highlighter (mirrors ink.ts HL_SCALE)
+// A stroke that has gone this long without a single event has lost its pointerup. Commit it and
+// release the surface — never sit on it. Real handwriting never rests the tip this long mid-stroke,
+// and even if it did, the next contact simply continues where this one ended.
+const STROKE_STALE_MS = 2500;
+const WATCHDOG_TICK = 500;
+const MAX_DPR = 2; // canvas backing store cap: N pages × 2 layers must stay under iOS's canvas ceiling
 
 /** #rrggbb → rgba() with the given alpha (for the hover ring's faint fill). */
 function hexA(hex: string, a: number): string {
@@ -45,6 +81,12 @@ function tiltFlatness(e: { tiltX: number; tiltY: number }): number {
   const mag = Math.hypot(e.tiltX || 0, e.tiltY || 0); // degrees; ~65° ≈ quite flat
   return Math.min(1, mag / 65);
 }
+
+/** Is the pen actually on the glass? Safari reports contact via pressure OR the tip "button". */
+function penInContact(e: PointerEvent): boolean {
+  return e.pressure > 0 || (e.buttons & 1) !== 0;
+}
+
 const GRID_COLOR = 'rgba(235, 235, 245, 0.10)'; // subtle rule lines on the dark paper
 
 type Op = { type: 'add'; stroke: Stroke } | { type: 'erase'; strokes: Stroke[] };
@@ -62,8 +104,6 @@ export interface InkEngine extends InkControls {
   liveRef: React.RefObject<HTMLCanvasElement>;
   onPointerDown: (e: ReactPointerEvent) => void;
   onPointerMove: (e: ReactPointerEvent) => void;
-  onPointerUp: (e: ReactPointerEvent) => void;
-  onPointerCancel: (e: ReactPointerEvent) => void;
   onPointerLeave: (e: ReactPointerEvent) => void;
 }
 
@@ -95,7 +135,8 @@ export function useInkEngine(
   // document layout on EVERY move (≈120 Hz on ProMotion) → main-thread stalls. We keep the rect
   // cached and refresh it only on resize/scroll/stroke-start, so moves never trigger layout.
   const rectRef = useRef<DOMRect | null>(null);
-  // rAF coalescing for hover work (ring + eraser preview) → at most one update per frame.
+  // rAF coalescing for the eraser's hover hit-test ONLY (it walks every committed stroke, so it must
+  // not run at pointer rate). The ring itself is written synchronously — it must never be starvable.
   const hoverRafRef = useRef<number | null>(null);
   const hoverPendingRef = useRef<{ x: number; y: number } | null>(null);
   // Last size/tool/colour written to the hover ring, so per-frame we touch ONLY transform.
@@ -104,11 +145,12 @@ export function useInkEngine(
   // ── stroke + history state (refs — never triggers a render) ─────────────────
   const committedRef = useRef<Stroke[]>([]);
   const liveStrokeRef = useRef<Stroke | null>(null);
+  const liveInkRef = useRef<LiveInk | null>(null); // append-only paint cursor into liveStrokeRef
   const undoStackRef = useRef<Op[]>([]);
   const redoStackRef = useRef<Op[]>([]);
   const penDownRef = useRef(false); // a pen is currently in contact (writing)
   const activePointerRef = useRef<number | null>(null);
-  const activeTypeRef = useRef<string | null>(null);
+  const captureElRef = useRef<HTMLElement | null>(null);
   // Finger-pan: on a pen device a single finger scrolls the notebook instead of drawing. The pan
   // only engages after the finger moves past a threshold (a stationary resting palm never scrolls),
   // and never within a short cooldown after a pen stroke (so micro-lifts between letters are safe).
@@ -118,8 +160,9 @@ export function useInkEngine(
   const lastScrollYRef = useRef(0);
   const penUpAtRef = useRef(0); // performance.now() of the last pen lift (scroll cooldown)
   const eraseHoverIdRef = useRef<string | null>(null); // stroke currently previewed for erase (hover)
-  const rafRef = useRef<number | null>(null);
   const sizeRef = useRef({ w: 0, h: 0 });
+  const lastEventAtRef = useRef(0); // watchdog: when the active stroke last heard from the browser
+  const watchdogRef = useRef<number | null>(null);
 
   // ── save bookkeeping ───────────────────────────────────────────────────────
   const dirtyRef = useRef(false);
@@ -155,24 +198,27 @@ export function useInkEngine(
     for (let i = 0; i < strokes.length; i++) drawStroke(ctx, strokes[i]);
   }, []);
 
+  /** Paint whatever of the live stroke is not yet on the glass. Append-only, synchronous, cheap. */
+  const paintLive = useCallback(() => {
+    const ctx = liveCtxRef.current;
+    const s = liveStrokeRef.current;
+    const li = liveInkRef.current;
+    if (!ctx || !s || !li) return;
+    drawLiveTail(ctx, s, li);
+  }, []);
+
+  /** Wipe the live layer. If a stroke is still in progress it OWNS this layer, so repaint it —
+   *  an eraser-preview clear must never be able to swallow ink that is being written. */
   const clearLive = useCallback(() => {
     const ctx = liveCtxRef.current;
     if (!ctx) return;
     const { w, h } = sizeRef.current;
     ctx.clearRect(0, 0, w, h);
-  }, []);
-
-  const scheduleLivePaint = useCallback(() => {
-    if (rafRef.current != null) return; // coalesce: ≤1 paint per frame
-    rafRef.current = requestAnimationFrame(() => {
-      rafRef.current = null;
-      const ctx = liveCtxRef.current;
-      if (!ctx) return;
-      const { w, h } = sizeRef.current;
-      ctx.clearRect(0, 0, w, h);
-      const s = liveStrokeRef.current;
-      if (s) drawStroke(ctx, s);
-    });
+    const s = liveStrokeRef.current;
+    if (s) {
+      liveInkRef.current = startLive(s);
+      drawLiveTail(ctx, s, liveInkRef.current);
+    }
   }, []);
 
   // ── persistence ─────────────────────────────────────────────────────────────
@@ -254,13 +300,11 @@ export function useInkEngine(
   );
 
   // ── pointer geometry (context is already DPR-scaled → work in CSS px) ────────
-  // Refresh the cached container rect (only on resize / scroll / stroke-start — never per move).
   const refreshRect = useCallback(() => {
     const c = containerRef.current;
     if (c) rectRef.current = c.getBoundingClientRect();
   }, []);
 
-  // Cached rect for the hot path; computes once if the cache is somehow empty.
   const rectNow = useCallback((): DOMRect => {
     if (!rectRef.current && containerRef.current) rectRef.current = containerRef.current.getBoundingClientRect();
     return rectRef.current ?? new DOMRect();
@@ -280,32 +324,34 @@ export function useInkEngine(
     if (el) el.style.display = 'none';
   }, [hoverRef]);
 
+  /** Written SYNCHRONOUSLY on every hover move. It is a transform on an element that already owns a
+   *  compositor layer (will-change:transform), so this is a cheap, canvas-free write — and, unlike
+   *  the old rAF-gated version, it cannot be frozen in place by a frame that never arrives. */
   const updateHoverRing = useCallback(
     (clientX: number, clientY: number) => {
       const el = hoverRef?.current;
       if (!el) return;
       const r = rectNow();
-      const tool = toolRef.current;
-      const eraser = tool === 'eraser';
+      const t = toolRef.current;
+      const eraser = t === 'eraser';
       const d = eraser
         ? ERASE_TOL * 2 + 16
-        : tool === 'highlighter'
+        : t === 'highlighter'
           ? Math.max(widthRef.current * HL_RING, 8)
           : Math.max(widthRef.current, 6);
-      // Only rewrite size/colour when they actually change (rare). Doing it every frame would
-      // dirty layout/paint and force iOS Safari to re-rasterise the huge canvas beneath the ring —
-      // the on-device freeze. Per frame we touch ONLY the (compositor-only) transform.
+      // Only rewrite size/colour when they actually change (rare). Doing it every frame would dirty
+      // layout/paint and force iOS Safari to re-rasterise the huge canvas beneath the ring.
       const st = ringStateRef.current;
-      const color = colorRef.current;
-      if (st.d !== d || st.tool !== tool || st.color !== color) {
+      const c = colorRef.current;
+      if (st.d !== d || st.tool !== t || st.color !== c) {
         el.style.width = `${d}px`;
         el.style.height = `${d}px`;
-        el.style.borderColor = eraser ? 'rgba(235, 235, 245, 0.7)' : color;
+        el.style.borderColor = eraser ? 'rgba(235, 235, 245, 0.7)' : c;
         el.style.borderStyle = eraser ? 'dashed' : 'solid';
-        el.style.background = eraser ? 'transparent' : hexA(color, 0.14);
+        el.style.background = eraser ? 'transparent' : hexA(c, 0.14);
         st.d = d;
-        st.tool = tool;
-        st.color = color;
+        st.tool = t;
+        st.color = c;
       }
       el.style.transform = `translate3d(${clientX - r.left}px, ${clientY - r.top}px, 0) translate(-50%, -50%)`;
       if (el.style.display !== 'block') el.style.display = 'block';
@@ -315,6 +361,7 @@ export function useInkEngine(
 
   // ── eraser hover: highlight (in red) the stroke a tap would delete ───────────
   const clearEraseHover = useCallback(() => {
+    if (liveStrokeRef.current) return; // a stroke owns the live layer — hands off
     if (eraseHoverIdRef.current == null) return;
     eraseHoverIdRef.current = null;
     clearLive();
@@ -323,7 +370,7 @@ export function useInkEngine(
   const updateEraseHover = useCallback(
     (clientX: number, clientY: number) => {
       const ctx = liveCtxRef.current;
-      if (!ctx) return;
+      if (!ctx || liveStrokeRef.current) return;
       const r = rectNow();
       const pt: Vec = { x: clientX - r.left, y: clientY - r.top };
       const strokes = committedRef.current;
@@ -345,18 +392,20 @@ export function useInkEngine(
     [clearLive, rectNow],
   );
 
-  // Coalesce hover work (ring + eraser preview) into one rAF tick per frame.
-  const scheduleHover = useCallback(
+  /** Hover: ring now (never starvable), eraser hit-test coalesced to one frame (it is O(strokes)). */
+  const onHover = useCallback(
     (clientX: number, clientY: number) => {
+      updateHoverRing(clientX, clientY);
+      if (toolRef.current !== 'eraser') {
+        clearEraseHover();
+        return;
+      }
       hoverPendingRef.current = { x: clientX, y: clientY };
       if (hoverRafRef.current != null) return;
       hoverRafRef.current = requestAnimationFrame(() => {
         hoverRafRef.current = null;
         const pt = hoverPendingRef.current;
-        if (!pt) return;
-        updateHoverRing(pt.x, pt.y);
-        if (toolRef.current === 'eraser') updateEraseHover(pt.x, pt.y);
-        else clearEraseHover();
+        if (pt) updateEraseHover(pt.x, pt.y);
       });
     },
     [updateHoverRing, updateEraseHover, clearEraseHover],
@@ -370,182 +419,35 @@ export function useInkEngine(
     hoverPendingRef.current = null;
   }, []);
 
-  // ── pointer handlers (stable; all mutable inputs come through refs) ──────────
-  const startDraw = useCallback(
-    (e: ReactPointerEvent) => {
-      try {
-        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-      } catch {
-        /* capture may be unavailable (e.g. pointer already released) */
-      }
-      activePointerRef.current = e.pointerId;
-      activeTypeRef.current = e.pointerType;
-      const at = xyOf(e.clientX, e.clientY);
-      if (toolRef.current === 'eraser') {
-        eraseAt(at);
-        return;
-      }
-      const strokeTool: StrokeTool = toolRef.current === 'highlighter' ? 'highlighter' : 'pen';
-      liveStrokeRef.current = {
-        id: uid('st'),
-        tool: strokeTool,
-        color: colorRef.current,
-        width: widthRef.current,
-        points: [{ x: at.x, y: at.y, p: e.pressure > 0 ? e.pressure : 0.5, t: tiltFlatness(e) }],
-      };
-      scheduleLivePaint();
-    },
-    [eraseAt, scheduleLivePaint, xyOf],
-  );
-
-  const onPointerDown = useCallback(
-    (e: ReactPointerEvent) => {
-      cancelHover();
-      hideHoverRing();
-      clearEraseHover();
-      refreshRect(); // one layout read at stroke start; moves then reuse the cache
-      if (e.pointerType === 'pen') {
-        penDownRef.current = true;
-        // The pen ALWAYS wins: abandon any pending finger-pan or stray active contact and draw.
-        // Never dropped — this is what makes the pencil grip reliably every time.
-        scrollPointerRef.current = null;
-        scrollActiveRef.current = false;
-        if (activePointerRef.current != null) {
-          liveStrokeRef.current = null;
-          clearLive();
-          activePointerRef.current = null;
-          activeTypeRef.current = null;
-        }
-        startDraw(e);
-        return;
-      }
-
-      if (e.pointerType === 'mouse') {
-        if (e.button !== 0) return; // left button only
-        if (activePointerRef.current != null) return;
-        startDraw(e);
-        return;
-      }
-
-      // touch — pen always has priority, and a palm-sized contact never counts.
-      if (penDownRef.current) return;
-      if (e.width > PALM_SIZE || e.height > PALM_SIZE) return;
-
-      if (onlyPencilRef.current) {
-        // Only-Pencil mode: a finger PANS the paper (it never draws). Palm-safe via cooldown +
-        // the move threshold below; no capture yet, so a pen can still preempt instantly.
-        if (performance.now() - penUpAtRef.current < SCROLL_COOLDOWN) return;
-        if (scrollPointerRef.current != null || activePointerRef.current != null) return;
-        scrollPointerRef.current = e.pointerId;
-        scrollActiveRef.current = false;
-        scrollStartYRef.current = e.clientY;
-        lastScrollYRef.current = e.clientY;
-        return;
-      }
-
-      // Only-Pencil OFF: a finger DRAWS (write with finger or pencil); no finger-pan on the paper.
-      if (activePointerRef.current != null) return;
-      startDraw(e);
-    },
-    [startDraw, clearLive, hideHoverRing, clearEraseHover, cancelHover, refreshRect],
-  );
-
-  const onPointerMove = useCallback(
-    (e: ReactPointerEvent) => {
-      // Finger pan: translate movement into notebook scroll, once past the engage threshold.
-      if (e.pointerId === scrollPointerRef.current) {
-        const sc = scrollParent?.current;
-        if (!sc) return;
-        const y = e.clientY;
-        if (!scrollActiveRef.current) {
-          if (Math.abs(y - scrollStartYRef.current) < SCROLL_THRESHOLD) return; // stationary → ignore
-          scrollActiveRef.current = true;
-          try {
-            (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-          } catch {
-            /* capture may be unavailable */
-          }
-        }
-        sc.scrollTop -= y - lastScrollYRef.current;
-        lastScrollYRef.current = y;
-        return;
-      }
-
-      // A pen with no active stroke: either HOVERING (show the nib preview / eraser target) or a
-      // fresh CONTACT. On hover-capable iPads the Pencil streams moves while floating and on contact
-      // Safari sometimes fires NO pointerdown — so a pressured move (pressure>0 or tip-down button)
-      // lazy-starts the stroke here; a floating pen (pressure 0) only drives the hover preview.
-      if (e.pointerType === 'pen' && activePointerRef.current == null) {
-        const contact = e.pressure > 0 || (e.buttons & 1) !== 0;
-        if (!contact) {
-          scheduleHover(e.clientX, e.clientY); // coalesced to one rAF/frame; no layout per move
-          return;
-        }
-        penDownRef.current = true;
-        scrollPointerRef.current = null;
-        scrollActiveRef.current = false;
-        cancelHover();
-        hideHoverRing();
-        clearEraseHover();
-        refreshRect();
-        startDraw(e);
-        return;
-      }
-
-      if (e.pointerId !== activePointerRef.current) return;
-      if (toolRef.current === 'eraser') {
-        eraseAt(xyOf(e.clientX, e.clientY));
-        return;
-      }
-      const live = liveStrokeRef.current;
-      if (!live) return;
-      const r = rectNow(); // cached — no per-move layout
-      const coalesced = e.nativeEvent.getCoalescedEvents?.();
-      const batch = coalesced && coalesced.length ? coalesced : [e.nativeEvent];
-      for (let i = 0; i < batch.length; i++) {
-        const ev = batch[i];
-        live.points.push({ x: ev.clientX - r.left, y: ev.clientY - r.top, p: ev.pressure > 0 ? ev.pressure : 0.5, t: tiltFlatness(ev) });
-      }
-      scheduleLivePaint();
-    },
-    [eraseAt, scheduleLivePaint, xyOf, scrollParent, startDraw, scheduleHover, cancelHover, hideHoverRing, clearEraseHover, refreshRect, rectNow],
-  );
-
+  // ── the single stroke exit ───────────────────────────────────────────────────
+  // Addressed by pointerId, NOT by a React event, so that window listeners, lostpointercapture, the
+  // watchdog, a preempting pen and unmount can ALL reach it. This is what makes the active pointer
+  // unlatchable: there is no longer a single fragile path out of a stroke.
   const endStroke = useCallback(
-    (e: ReactPointerEvent, commit: boolean) => {
-      // End a finger pan (whether or not it ever engaged).
-      if (e.pointerId === scrollPointerRef.current) {
-        scrollPointerRef.current = null;
-        scrollActiveRef.current = false;
+    (pointerId: number, commit: boolean) => {
+      if (activePointerRef.current !== pointerId) return;
+      activePointerRef.current = null;
+      inkDiag.active = -1;
+
+      if (watchdogRef.current != null) {
+        clearTimeout(watchdogRef.current);
+        watchdogRef.current = null;
+      }
+
+      const el = captureElRef.current;
+      captureElRef.current = null;
+      if (el) {
         try {
-          (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+          if (el.hasPointerCapture(pointerId)) el.releasePointerCapture(pointerId);
         } catch {
           /* capture may already be gone */
         }
-        return;
-      }
-      if (e.pointerType === 'pen') {
-        penDownRef.current = false;
-        penUpAtRef.current = performance.now();
-      }
-      if (e.pointerId !== activePointerRef.current) return;
-      activePointerRef.current = null;
-      activeTypeRef.current = null;
-      try {
-        (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
-      } catch {
-        /* capture may already be gone */
-      }
-
-      if (rafRef.current != null) {
-        cancelAnimationFrame(rafRef.current);
-        rafRef.current = null;
       }
 
       const live = liveStrokeRef.current;
       liveStrokeRef.current = null;
+      liveInkRef.current = null;
       clearLive();
-      if (toolRef.current === 'eraser') return;
       if (!commit || !live || live.points.length === 0) return;
 
       committedRef.current = committedRef.current.concat(live);
@@ -557,22 +459,264 @@ export function useInkEngine(
     [clearLive, pushOp, scheduleSave],
   );
 
-  const onPointerUp = useCallback((e: ReactPointerEvent) => endStroke(e, true), [endStroke]);
-  // Commit on cancel too: iOS can fire pointercancel on the pen if a stray palm touch starts a
-  // browser gesture. Discarding would make a pen stroke silently vanish ("es kommt nichts") — so
-  // we keep whatever was drawn instead of losing it.
-  const onPointerCancel = useCallback((e: ReactPointerEvent) => endStroke(e, true), [endStroke]);
+  /** A stroke that stops hearing from the browser has lost its pointerup (Safari drops it when the
+   *  capture silently no-ops). Commit the ink and free the surface rather than sit on it forever. */
+  const armWatchdog = useCallback(() => {
+    if (watchdogRef.current != null) return;
+    const tick = () => {
+      watchdogRef.current = null;
+      const id = activePointerRef.current;
+      if (id == null) return;
+      if (performance.now() - lastEventAtRef.current > STROKE_STALE_MS) {
+        inkDiag.dog++;
+        endStroke(id, true);
+        return;
+      }
+      watchdogRef.current = window.setTimeout(tick, WATCHDOG_TICK);
+    };
+    watchdogRef.current = window.setTimeout(tick, WATCHDOG_TICK);
+  }, [endStroke]);
+
+  // ── stroke start ─────────────────────────────────────────────────────────────
+  const startDraw = useCallback(
+    (e: PointerEvent) => {
+      const el = liveRef.current;
+      if (el) {
+        try {
+          el.setPointerCapture(e.pointerId);
+        } catch {
+          /* capture is a nicety, not the routing mechanism — window listeners carry the stroke */
+        }
+        captureElRef.current = el;
+        // setPointerCapture RETURNS SILENTLY when the pointer is not in the active buttons state —
+        // exactly the Pencil's hover→contact state. Record which way it went so the HUD can show it.
+        try {
+          if (el.hasPointerCapture(e.pointerId)) inkDiag.cap++;
+          else inkDiag.nocap++;
+        } catch {
+          inkDiag.nocap++;
+        }
+      }
+      activePointerRef.current = e.pointerId;
+      inkDiag.active = e.pointerId;
+      lastEventAtRef.current = performance.now();
+      armWatchdog();
+
+      const at = xyOf(e.clientX, e.clientY);
+      if (toolRef.current === 'eraser') {
+        eraseAt(at);
+        return;
+      }
+      const strokeTool: StrokeTool = toolRef.current === 'highlighter' ? 'highlighter' : 'pen';
+      const s: Stroke = {
+        id: uid('st'),
+        tool: strokeTool,
+        color: colorRef.current,
+        width: widthRef.current,
+        points: [{ x: at.x, y: at.y, p: e.pressure > 0 ? e.pressure : 0.5, t: tiltFlatness(e) }],
+      };
+      liveStrokeRef.current = s;
+      liveInkRef.current = startLive(s);
+      paintLive(); // the nib lands on the glass NOW — never on a frame that may not come
+    },
+    [eraseAt, paintLive, xyOf, armWatchdog],
+  );
+
+  /** The pen ALWAYS wins. Whatever the surface thought it was doing — a finger pan, or a stroke
+   *  whose pointerup the browser never delivered — a fresh contact takes it over. This is the line
+   *  that makes the old permanent wedge impossible: a stale owner can no longer refuse the pen. */
+  const preemptForPen = useCallback(() => {
+    penDownRef.current = true;
+    scrollPointerRef.current = null;
+    scrollActiveRef.current = false;
+    const stale = activePointerRef.current;
+    if (stale != null) {
+      inkDiag.take++;
+      endStroke(stale, true); // keep the orphaned ink; do not silently drop it
+    }
+    cancelHover();
+    hideHoverRing();
+    clearEraseHover();
+    refreshRect(); // one layout read at stroke start; moves then reuse the cache
+  }, [endStroke, cancelHover, hideHoverRing, clearEraseHover, refreshRect]);
+
+  // ── the drawing move (runs from the WINDOW listener while a stroke is live) ───
+  const moveActive = useCallback(
+    (e: PointerEvent) => {
+      lastEventAtRef.current = performance.now();
+      inkDiag.move++;
+      if (toolRef.current === 'eraser') {
+        eraseAt(xyOf(e.clientX, e.clientY));
+        return;
+      }
+      const live = liveStrokeRef.current;
+      if (!live) return;
+      const r = rectNow(); // cached — no per-move layout
+      const coalesced = e.getCoalescedEvents?.();
+      const batch = coalesced && coalesced.length ? coalesced : [e];
+      for (let i = 0; i < batch.length; i++) {
+        const ev = batch[i];
+        live.points.push({ x: ev.clientX - r.left, y: ev.clientY - r.top, p: ev.pressure > 0 ? ev.pressure : 0.5, t: tiltFlatness(ev) });
+      }
+      inkDiag.pts += batch.length;
+      paintLive(); // synchronous, append-only: ink cannot be starved by the compositor
+    },
+    [eraseAt, paintLive, xyOf, rectNow],
+  );
+
+  // ── canvas-level handlers (stroke START, hover, finger-pan) ──────────────────
+  const onPointerDown = useCallback(
+    (re: ReactPointerEvent) => {
+      const e = re.nativeEvent;
+      if (e.pointerType === 'pen') {
+        inkDiag.down++;
+        preemptForPen();
+        startDraw(e);
+        return;
+      }
+
+      if (e.pointerType === 'mouse') {
+        if (e.button !== 0) return; // left button only
+        if (activePointerRef.current != null) return;
+        cancelHover();
+        hideHoverRing();
+        clearEraseHover();
+        refreshRect();
+        startDraw(e);
+        return;
+      }
+
+      // touch — pen always has priority, and a palm-sized contact never counts.
+      if (penDownRef.current) return;
+      if (e.width > PALM_SIZE || e.height > PALM_SIZE) return;
+
+      if (onlyPencilRef.current) {
+        // Only-Pencil mode: a finger PANS the paper (it never draws). Palm-safe via cooldown + the
+        // move threshold below; no capture yet, so a pen can still preempt instantly.
+        if (performance.now() - penUpAtRef.current < SCROLL_COOLDOWN) return;
+        if (scrollPointerRef.current != null || activePointerRef.current != null) return;
+        scrollPointerRef.current = e.pointerId;
+        scrollActiveRef.current = false;
+        scrollStartYRef.current = e.clientY;
+        lastScrollYRef.current = e.clientY;
+        return;
+      }
+
+      // Only-Pencil OFF: a finger DRAWS (write with finger or pencil); no finger-pan on the paper.
+      if (activePointerRef.current != null) return;
+      cancelHover();
+      hideHoverRing();
+      clearEraseHover();
+      refreshRect();
+      startDraw(e);
+    },
+    [startDraw, preemptForPen, cancelHover, hideHoverRing, clearEraseHover, refreshRect],
+  );
+
+  const onPointerMove = useCallback(
+    (re: ReactPointerEvent) => {
+      const e = re.nativeEvent;
+      // A live stroke is carried by the window listener — never draw it twice.
+      if (e.pointerId === activePointerRef.current) return;
+
+      // Finger pan: translate movement into notebook scroll, once past the engage threshold. Guarded
+      // on pointerType so a PEN can never be swallowed by a stranded pan id (iOS reuses pointerIds).
+      if (e.pointerType !== 'pen' && e.pointerId === scrollPointerRef.current) {
+        const sc = scrollParent?.current;
+        if (!sc) return;
+        const y = e.clientY;
+        if (!scrollActiveRef.current) {
+          if (Math.abs(y - scrollStartYRef.current) < SCROLL_THRESHOLD) return; // stationary → ignore
+          scrollActiveRef.current = true;
+          try {
+            (re.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+          } catch {
+            /* capture may be unavailable */
+          }
+        }
+        sc.scrollTop -= y - lastScrollYRef.current;
+        lastScrollYRef.current = y;
+        return;
+      }
+
+      // A pen with no stroke of ours: either HOVERING (drive the nib preview) or a fresh CONTACT.
+      // iPadOS regularly fires NO pointerdown on hover→contact, so a pressured move LAZY-STARTS the
+      // stroke here. This is the path that actually starts most Pencil strokes on the iPad.
+      if (e.pointerType === 'pen') {
+        if (!penInContact(e)) {
+          onHover(e.clientX, e.clientY);
+          return;
+        }
+        inkDiag.lazy++;
+        preemptForPen();
+        startDraw(e);
+        return;
+      }
+    },
+    [scrollParent, startDraw, preemptForPen, onHover],
+  );
 
   // Pen left the hover range (or pointer left the surface): drop the nib ring + erase preview.
   const onPointerLeave = useCallback(
-    (e: ReactPointerEvent) => {
-      if (e.pointerId === activePointerRef.current) return; // mid-stroke (captured) → ignore
+    (re: ReactPointerEvent) => {
+      if (re.nativeEvent.pointerId === activePointerRef.current) return; // mid-stroke → ignore
       cancelHover();
       hideHoverRing();
       clearEraseHover();
     },
     [cancelHover, hideHoverRing, clearEraseHover],
   );
+
+  // ── window-level stroke transport ────────────────────────────────────────────
+  // The stroke does NOT depend on pointer capture, and does NOT depend on the pen staying inside the
+  // canvas box. Whatever element the UA decides to hit-test — a page gap, a rounded corner, the
+  // sheet next door — these listeners see the move and the lift. A pointerup can no longer be lost.
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      if (activePointerRef.current !== e.pointerId) return;
+      moveActive(e);
+    };
+    const finish = (e: PointerEvent, commit: boolean) => {
+      if (e.pointerType === 'pen') {
+        penDownRef.current = false;
+        penUpAtRef.current = performance.now();
+      }
+      // A finger-pan ends here too (its pointerup can be dropped just as easily as the pen's).
+      if (e.pointerId === scrollPointerRef.current) {
+        scrollPointerRef.current = null;
+        scrollActiveRef.current = false;
+      }
+      endStroke(e.pointerId, commit);
+    };
+    const onUp = (e: PointerEvent) => {
+      if (activePointerRef.current === e.pointerId) inkDiag.up++;
+      finish(e, true);
+    };
+    // Commit on cancel too: iOS fires pointercancel on the pen when a stray palm starts a browser
+    // gesture. Discarding would make a pen stroke silently vanish — keep whatever was drawn.
+    const onCancel = (e: PointerEvent) => {
+      if (activePointerRef.current === e.pointerId) inkDiag.cancel++;
+      finish(e, true);
+    };
+    const onLost = (e: PointerEvent) => {
+      if (activePointerRef.current !== e.pointerId) return;
+      inkDiag.lost++;
+      // Capture was yanked out from under us. The pen may still be down, but we can no longer trust
+      // that its lift will find us — commit now; a continuing pen simply preempts into a new stroke.
+      endStroke(e.pointerId, true);
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
+    window.addEventListener('lostpointercapture', onLost);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+      window.removeEventListener('lostpointercapture', onLost);
+    };
+  }, [moveActive, endStroke]);
 
   // ── sizing: DPR-aware, re-run on container resize ────────────────────────────
   useEffect(() => {
@@ -582,7 +726,7 @@ export function useInkEngine(
     const resize = () => {
       const rect = container.getBoundingClientRect();
       rectRef.current = rect; // keep the hot-path cache fresh
-      const dpr = window.devicePixelRatio || 1;
+      const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
       sizeRef.current = { w: rect.width, h: rect.height };
       const canvases = [baseRef.current, liveRef.current];
       for (const canvas of canvases) {
@@ -595,26 +739,40 @@ export function useInkEngine(
       baseCtxRef.current = baseRef.current?.getContext('2d') ?? null;
       liveCtxRef.current = liveRef.current?.getContext('2d') ?? null;
       redrawBase();
-      // A resize mid-stroke: repaint the live layer too so it isn't left blank.
-      if (liveStrokeRef.current) scheduleLivePaint();
+      // Reassigning canvas.width blew the live bitmap away. Repaint the in-progress stroke from
+      // scratch onto the fresh surface (startLive rewinds the append cursor to point 0).
+      const s = liveStrokeRef.current;
+      const ctx = liveCtxRef.current;
+      if (s && ctx) {
+        liveInkRef.current = startLive(s);
+        drawLiveTail(ctx, s, liveInkRef.current);
+      }
     };
 
     resize();
     const ro = new ResizeObserver(resize);
     ro.observe(container);
     return () => ro.disconnect();
-  }, [redrawBase, scheduleLivePaint]);
+  }, [redrawBase]);
 
   // Scrolling moves the sheet (rect.top changes) but doesn't resize it, so refresh the cached rect
-  // on scroll + window resize. This is the only place (besides stroke-start) that reads layout.
+  // on scroll + window resize. visualViewport covers Safari's URL-bar collapse and the on-screen
+  // keyboard, which shift the page WITHOUT firing a scroll event on the container.
   useEffect(() => {
     const sc = scrollParent?.current;
     const onChange = () => refreshRect();
     sc?.addEventListener('scroll', onChange, { passive: true });
     window.addEventListener('resize', onChange);
+    window.addEventListener('scroll', onChange, { passive: true, capture: true });
+    const vv = window.visualViewport;
+    vv?.addEventListener('resize', onChange);
+    vv?.addEventListener('scroll', onChange);
     return () => {
       sc?.removeEventListener('scroll', onChange);
       window.removeEventListener('resize', onChange);
+      window.removeEventListener('scroll', onChange, { capture: true } as EventListenerOptions);
+      vv?.removeEventListener('resize', onChange);
+      vv?.removeEventListener('scroll', onChange);
     };
   }, [scrollParent, refreshRect]);
 
@@ -630,6 +788,7 @@ export function useInkEngine(
       setUndoCount(0);
       setRedoCount(0);
       liveStrokeRef.current = null;
+      liveInkRef.current = null;
       dirtyRef.current = false;
       savePageIdRef.current = pageId;
       clearLive();
@@ -646,11 +805,11 @@ export function useInkEngine(
     redrawBase();
   }, [background, redrawBase]);
 
-  // ── unmount: cancel any pending frame/save ───────────────────────────────────
+  // ── unmount: cancel any pending frame/timer/save ─────────────────────────────
   useEffect(() => {
     return () => {
-      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
       if (hoverRafRef.current != null) cancelAnimationFrame(hoverRafRef.current);
+      if (watchdogRef.current != null) clearTimeout(watchdogRef.current);
       flushSave();
     };
   }, [flushSave]);
@@ -661,8 +820,6 @@ export function useInkEngine(
     liveRef,
     onPointerDown,
     onPointerMove,
-    onPointerUp,
-    onPointerCancel,
     onPointerLeave,
     canUndo: undoCount > 0,
     canRedo: redoCount > 0,

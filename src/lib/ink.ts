@@ -127,6 +127,96 @@ export function drawStroke(ctx: CanvasRenderingContext2D, s: Stroke): void {
   ctx.restore();
 }
 
+/* ── live (in-progress) painting ───────────────────────────────────────────────────────────────
+ * The in-progress stroke is painted APPEND-ONLY: each new segment is stroked straight onto the
+ * live layer and the layer is never cleared mid-stroke. Two things follow, and both are why the
+ * iPad used to drop strokes:
+ *   • Ink is no longer gated on a frame. The old engine painted the live stroke only inside a rAF
+ *     callback, so a frame iOS chose not to deliver meant NOTHING was drawn — and the whole stroke
+ *     then popped onto the base layer at lift ("either completely or not at all").
+ *   • No per-frame clearRect over a multi-megapixel canvas, which was the repaint tax behind the
+ *     stutter.
+ * Geometry matches drawStroke() exactly, minus the closing half-segment to the newest vertex: the
+ * ribbon therefore trails the nib by half a sample (≈4 ms at 120 Hz) and never overdraws itself,
+ * which at these alphas would darken every joint. The committed stroke is re-rendered whole onto
+ * the base layer, so the finished ink is identical. */
+
+export interface LiveInk {
+  prevMid: Vec;
+  drawn: number; // index of the newest point already on the live layer
+  dot: boolean; // the pen-down dot has been laid
+}
+
+export function startLive(s: Stroke): LiveInk {
+  const p0 = s.points[0];
+  return { prevMid: { x: p0?.x ?? 0, y: p0?.y ?? 0 }, drawn: 0, dot: false };
+}
+
+/** Paint only the segments of `s` that are not yet on the canvas. Never clears; safe to call at
+ *  pointer rate. Re-running it against a fresh `startLive` repaints the stroke from scratch (used
+ *  when a resize blows the bitmap away mid-stroke). */
+export function drawLiveTail(ctx: CanvasRenderingContext2D, s: Stroke, live: LiveInk): void {
+  const pts = s.points;
+  if (pts.length === 0) return;
+
+  ctx.save();
+  ctx.strokeStyle = s.color;
+  ctx.lineJoin = 'round';
+  ctx.globalCompositeOperation = 'source-over';
+
+  if (s.tool === 'highlighter') {
+    ctx.globalAlpha = HL_ALPHA;
+    ctx.lineCap = 'butt';
+    ctx.lineWidth = s.width * HL_SCALE;
+    for (let i = live.drawn + 1; i < pts.length; i++) {
+      const a = pts[i - 1];
+      const b = pts[i];
+      const mid: Vec = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+      ctx.beginPath();
+      ctx.moveTo(live.prevMid.x, live.prevMid.y);
+      ctx.quadraticCurveTo(a.x, a.y, mid.x, mid.y);
+      ctx.stroke();
+      live.prevMid = mid;
+    }
+    live.drawn = pts.length - 1;
+    ctx.restore();
+    return;
+  }
+
+  ctx.lineCap = 'round';
+
+  // The nib touches down: lay the pressure-sized dot at once, so contact is visible on the glass
+  // before a single move has arrived.
+  if (!live.dot) {
+    live.dot = true;
+    const p0 = pts[0];
+    const t0 = p0.t ?? 0;
+    ctx.globalAlpha = penAlpha(p0.p, t0);
+    ctx.fillStyle = s.color;
+    ctx.beginPath();
+    ctx.arc(p0.x, p0.y, penWidth(s.width, p0.p, t0) / 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  for (let i = live.drawn + 1; i < pts.length; i++) {
+    const a = pts[i - 1];
+    const b = pts[i];
+    const avgP = (a.p + b.p) / 2;
+    const avgT = ((a.t ?? 0) + (b.t ?? 0)) / 2;
+    const mid: Vec = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    ctx.lineWidth = penWidth(s.width, avgP, avgT);
+    ctx.globalAlpha = penAlpha(avgP, avgT);
+    ctx.beginPath();
+    ctx.moveTo(live.prevMid.x, live.prevMid.y);
+    ctx.quadraticCurveTo(a.x, a.y, mid.x, mid.y);
+    ctx.stroke();
+    live.prevMid = mid;
+  }
+  live.drawn = pts.length - 1;
+
+  ctx.restore();
+}
+
 /** Overlay a stroke in a "will be erased" style (used for the eraser hover preview). */
 export function drawEraseHighlight(ctx: CanvasRenderingContext2D, s: Stroke): void {
   const pts = s.points;
