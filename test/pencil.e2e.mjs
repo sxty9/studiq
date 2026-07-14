@@ -11,12 +11,13 @@
  * faithful stand-in for WebKit's silent no-op: either way the stroke runs UNCAPTURED.
  */
 import { createRequire } from 'node:module';
-const { chromium } = createRequire(import.meta.url)('playwright-core');
+const pw = createRequire(import.meta.url)('playwright-core');
+const ENGINE = process.env.ENGINE || 'chromium';
 
 const URL = process.env.URL || 'http://localhost:5199/?perf=1';
 const PEN = { pointerType: 'pen', isPrimary: true, bubbles: true, cancelable: true, composed: true };
 
-const browser = await chromium.launch();
+const browser = await pw[ENGINE].launch();
 const page = await browser.newPage({ viewport: { width: 1180, height: 900 } });
 const errors = [];
 page.on('pageerror', (e) => errors.push(String(e)));
@@ -124,6 +125,29 @@ const result = await page.evaluate(async () => {
   out.F_committed = inkPixels(base) - beforeF; // MUST be > 0: the fresh contact preempted the orphan
   out.F_active = await hud();
 
+  // ── G. iPadOS keeps the SAME pointerId across hover→contact→lift→hover. Lose the lift, then let
+  //       the pen hover and write again ON THE SAME ID. This is the hole the first fix missed: the
+  //       stale owner's id matched the incoming events, so every move was refused — ring frozen, no
+  //       ink, forever.
+  const beforeG = inkPixels(base);
+  for (let i = 0; i <= 20; i++) ev('pointermove', 9, 60 + i * 6, 600 + i * 2, 0.6, 1);
+  await sleep(40);
+  // the lift never arrives anywhere. the pen simply goes back to hovering — same id 9.
+  ev('pointermove', 9, 300, 640, 0, 0);
+  const gRingA = ringXY();
+  ev('pointermove', 9, 360, 650, 0, 0);
+  const gRingB = ringXY();
+  out.G_ringFollowsSameId = gRingA !== gRingB && gRingB !== '';
+
+  const beforeG2 = inkPixels(base);
+  for (let i = 0; i <= 20; i++) ev('pointermove', 9, 60 + i * 6, 700 + i * 2, 0.6, 1); // writes again, same id
+  await sleep(40);
+  ev('pointerup', 9, 180, 740, 0, 0);
+  await sleep(60);
+  out.G_committed = inkPixels(base) - beforeG2;
+  out.G_active = await hud();
+  void beforeG;
+
   out.hudLine = document.body.innerText.match(/act .*|down .*|up .*/g)?.join(' | ');
   return out;
 });
@@ -146,8 +170,11 @@ check('D releases the surface', result.D_active === '-1', `act=${result.D_active
 check('E orphaned stroke (lift never dispatched at all) is kept, not lost', result.E_orphanCommitted === true, `${result.E_orphanCommitted}`);
 check('F fresh pen contact PREEMPTS the orphan and draws', result.F_committed > 0, `${result.F_committed} px`);
 check('F releases the surface', result.F_active === '-1', `act=${result.F_active}`);
+check('G hover ring follows a pen REUSING the stale pointerId', result.G_ringFollowsSameId === true, `${result.G_ringFollowsSameId}`);
+check('G next stroke on the SAME pointerId still draws', result.G_committed > 0, `${result.G_committed} px`);
+check('G releases the surface', result.G_active === '-1', `act=${result.G_active}`);
 
-console.log('\nHUD:', result.hudLine, '\n');
+console.log(`\n[${ENGINE}] HUD:`, result.hudLine, '\n');
 for (const p of pass) console.log('  PASS  ' + p);
 for (const f of fail) console.log('  FAIL  ' + f);
 if (errors.length) console.log('\npage errors:', errors.join('\n'));

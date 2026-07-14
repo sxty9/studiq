@@ -9,7 +9,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "tsc -p tsconfig.json --noEmit && vite build",
     "preview": "vite preview",
-    "test:pencil": "vite build && (vite preview --port 5199 --strictPort & sleep 3; node test/pencil.e2e.mjs; s=$?; kill %1 2>/dev/null; exit $s)"
+    "test:pencil": "vite build && (vite preview --port 5199 --strictPort & sleep 3; node test/pencil.e2e.mjs && ENGINE=webkit node test/pencil.e2e.mjs; s=$?; kill %1 2>/dev/null; exit $s)"
   },
   "dependencies": {
     "clsx": "^2.1.1",

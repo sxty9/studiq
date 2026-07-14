@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPoi
 import type { PageBackground, Stroke, StrokeTool, Tool } from '@/types';
 import { uid } from '@/lib/id';
 import { drawBackground, drawEraseHighlight, drawLiveTail, drawStroke, hitStroke, startLive, type LiveInk, type Vec } from '@/lib/ink';
-import { inkDiag } from '@/lib/inkDiag';
+import { diagLog, evStr, inkDiag } from '@/lib/inkDiag';
 
 /* ─────────────────────────────────────────────────────────────────────────────
  * The latency-critical core of the Note tab.
@@ -469,6 +469,7 @@ export function useInkEngine(
       if (id == null) return;
       if (performance.now() - lastEventAtRef.current > STROKE_STALE_MS) {
         inkDiag.dog++;
+        diagLog(`WATCHDOG id=${id}`);
         endStroke(id, true);
         return;
       }
@@ -532,6 +533,7 @@ export function useInkEngine(
     const stale = activePointerRef.current;
     if (stale != null) {
       inkDiag.take++;
+      diagLog(`TAKE over stale id=${stale}`);
       endStroke(stale, true); // keep the orphaned ink; do not silently drop it
     }
     cancelHover();
@@ -570,6 +572,7 @@ export function useInkEngine(
       const e = re.nativeEvent;
       if (e.pointerType === 'pen') {
         inkDiag.down++;
+        diagLog(`down ${evStr(e)}`);
         preemptForPen();
         startDraw(e);
         return;
@@ -616,6 +619,24 @@ export function useInkEngine(
   const onPointerMove = useCallback(
     (re: ReactPointerEvent) => {
       const e = re.nativeEvent;
+
+      // A pen with no contact is OFF THE GLASS — whatever we believed about it. If we still think it
+      // owns a stroke, then its pointerup never reached us: end the stroke here rather than sit on
+      // it. This is the second half of the wedge, and the half the first fix missed: iPadOS keeps
+      // the SAME pointerId across a hover→contact→lift→hover cycle, so a stale owner whose id the
+      // pen still carries would otherwise be refused by the guard below on every single move — no
+      // ink, and a hover ring frozen exactly where it stopped.
+      if (e.pointerType === 'pen' && !penInContact(e)) {
+        inkDiag.hoverId = e.pointerId;
+        if (activePointerRef.current === e.pointerId) {
+          inkDiag.lift++;
+          diagLog(`lift! ${evStr(e)} (missed up)`);
+          endStroke(e.pointerId, true);
+        }
+        onHover(e.clientX, e.clientY);
+        return;
+      }
+
       // A live stroke is carried by the window listener — never draw it twice.
       if (e.pointerId === activePointerRef.current) return;
 
@@ -639,21 +660,17 @@ export function useInkEngine(
         return;
       }
 
-      // A pen with no stroke of ours: either HOVERING (drive the nib preview) or a fresh CONTACT.
-      // iPadOS regularly fires NO pointerdown on hover→contact, so a pressured move LAZY-STARTS the
-      // stroke here. This is the path that actually starts most Pencil strokes on the iPad.
+      // A pen in contact with no stroke of ours: iPadOS regularly fires NO pointerdown on
+      // hover→contact, so a pressured move LAZY-STARTS the stroke here. This is the path that
+      // actually starts most Pencil strokes on the iPad.
       if (e.pointerType === 'pen') {
-        if (!penInContact(e)) {
-          onHover(e.clientX, e.clientY);
-          return;
-        }
         inkDiag.lazy++;
+        diagLog(`lazy ${evStr(e)}`);
         preemptForPen();
         startDraw(e);
-        return;
       }
     },
-    [scrollParent, startDraw, preemptForPen, onHover],
+    [scrollParent, startDraw, preemptForPen, endStroke, onHover],
   );
 
   // Pen left the hover range (or pointer left the surface): drop the nib ring + erase preview.
@@ -674,6 +691,14 @@ export function useInkEngine(
   useEffect(() => {
     const onMove = (e: PointerEvent) => {
       if (activePointerRef.current !== e.pointerId) return;
+      // Same rule as on the canvas, for a pen that has drifted off this element: no contact means it
+      // is not writing, so a stroke we still hold has lost its pointerup. Never append hover points.
+      if (e.pointerType === 'pen' && !penInContact(e)) {
+        inkDiag.lift++;
+        diagLog(`lift! ${evStr(e)} (off-canvas)`);
+        endStroke(e.pointerId, true);
+        return;
+      }
       moveActive(e);
     };
     const finish = (e: PointerEvent, commit: boolean) => {
@@ -689,18 +714,25 @@ export function useInkEngine(
       endStroke(e.pointerId, commit);
     };
     const onUp = (e: PointerEvent) => {
-      if (activePointerRef.current === e.pointerId) inkDiag.up++;
+      if (activePointerRef.current === e.pointerId) {
+        inkDiag.up++;
+        diagLog(`up ${evStr(e)}`);
+      }
       finish(e, true);
     };
     // Commit on cancel too: iOS fires pointercancel on the pen when a stray palm starts a browser
     // gesture. Discarding would make a pen stroke silently vanish — keep whatever was drawn.
     const onCancel = (e: PointerEvent) => {
-      if (activePointerRef.current === e.pointerId) inkDiag.cancel++;
+      if (activePointerRef.current === e.pointerId) {
+        inkDiag.cancel++;
+        diagLog(`CANCEL ${evStr(e)}`);
+      }
       finish(e, true);
     };
     const onLost = (e: PointerEvent) => {
       if (activePointerRef.current !== e.pointerId) return;
       inkDiag.lost++;
+      diagLog(`LOSTCAPTURE id=${e.pointerId}`);
       // Capture was yanked out from under us. The pen may still be down, but we can no longer trust
       // that its lift will find us — commit now; a continuing pen simply preempts into a new stroke.
       endStroke(e.pointerId, true);
