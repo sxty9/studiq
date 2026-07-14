@@ -47,6 +47,18 @@ import { diagLog, evStr, inkDiag } from '@/lib/inkDiag';
  *     meant nothing was drawn at all — and at lift the whole stroke was blitted onto the base layer
  *     in one shot. Now ink is stroked synchronously in the pointer handler, append-only, with no
  *     full-canvas clear (see drawLiveTail in lib/ink.ts). Ink cannot be starved by the compositor.
+ *
+ *  3. iPadOS SCRIBBLE ate whole strokes before the page ever saw them — see the touchstart listener
+ *     below. This is the one that needs no bug on our side at all, and it is why `touch-action: none`
+ *     was never going to be enough.
+ *
+ * Two WebKit facts this file is built around (verified in WebKit source, not folklore):
+ *   • Pen HOVER and pen CONTACT are different pipelines with different pointerIds — hover arrives on
+ *     the mouse path with the constant mousePointerID (1), contact on the touch path with a fresh,
+ *     randomly-seeded id PER STROKE. So a pointerId must never be treated as stable across a stroke
+ *     boundary, and a remembered id must never gate anything.
+ *   • WebKit grants implicit pointer capture to `touch` only — NOT to `pen`. An uncaptured pen is the
+ *     normal case on iPad, which is why the stroke is carried on window listeners.
  * ────────────────────────────────────────────────────────────────────────── */
 
 const MAX_HISTORY = 100;
@@ -749,6 +761,36 @@ export function useInkEngine(
       window.removeEventListener('lostpointercapture', onLost);
     };
   }, [moveActive, endStroke]);
+
+  // ── iPadOS Scribble: the reason strokes vanish ───────────────────────────────
+  // Scribble is a SYSTEM handwriting recogniser that sits on the Pencil BEFORE the page sees it —
+  // and it does not care that this is a <canvas>: it fires because our strokes look like writing,
+  // which is exactly what they are. When it grabs a stroke, NO pointer events are delivered at all:
+  // no ink, and the hover ring simply stops dead at its last position (the reported symptom, to the
+  // letter). `touch-action: none` does NOT stop it — that only governs pan/zoom. The one thing that
+  // does is preventDefault() on touchstart.
+  //
+  // It must be a NATIVE, non-passive listener: React registers touchstart/touchmove as PASSIVE, and
+  // preventDefault() in a passive listener is a silent no-op. This is the same fix excalidraw shipped
+  // for "Apple Pen missing strokes" and tldraw for "strokes incomplete when writing fast".
+  //
+  // Cancelling the touch default does not suppress pointer events — pointerdown is dispatched before
+  // touchstart, and preventDefault only cancels the default ACTION (Scribble, the double-tap zoom
+  // loupe, callouts, compat mouse events). The finger-pan is unaffected: it runs on pointer events
+  // and moves scrollTop itself, never on native scrolling.
+  useEffect(() => {
+    const el = liveRef.current;
+    if (!el) return;
+    const swallow = (e: TouchEvent) => e.preventDefault();
+    el.addEventListener('touchstart', swallow, { passive: false });
+    el.addEventListener('touchmove', swallow, { passive: false });
+    el.addEventListener('touchend', swallow, { passive: false });
+    return () => {
+      el.removeEventListener('touchstart', swallow);
+      el.removeEventListener('touchmove', swallow);
+      el.removeEventListener('touchend', swallow);
+    };
+  }, []);
 
   // ── sizing: DPR-aware, re-run on container resize ────────────────────────────
   useEffect(() => {

@@ -148,6 +148,34 @@ const result = await page.evaluate(async () => {
   out.G_active = await hud();
   void beforeG;
 
+  // ── H. Scribble defence: touchstart must be CANCELLED. React registers touchstart passively, where
+  //       preventDefault() is a silent no-op — so this proves the listener is native + non-passive.
+  //       Without this, iPadOS Scribble takes the Pencil stroke and the page sees NO pointer events
+  //       at all: no ink, and the hover ring stops dead. That is the reported bug, verbatim.
+  out.H_touchStartPrevented = live.dispatchEvent(new TouchEvent('touchstart', { bubbles: true, cancelable: true })) === false;
+  out.H_touchMovePrevented = live.dispatchEvent(new TouchEvent('touchmove', { bubbles: true, cancelable: true })) === false;
+
+  // ── I. WebKit's REAL pointerId scheme: hover comes up the mouse path as the constant id 1; every
+  //       contact comes up the touch path with a fresh id. Model that exactly, and lose a lift.
+  const HOVER_ID = 1;
+  const beforeI = inkPixels(base);
+  ev('pointermove', HOVER_ID, 400, 300, 0, 0); // hovering (mouse path, id 1)
+  for (let i = 0; i <= 20; i++) ev('pointermove', 7001, 400 + i * 6, 300 + i * 2, 0.6, 1); // contact, fresh id
+  await sleep(40);
+  liftElsewhere(7001, 520, 340); // its lift goes astray
+  ev('pointermove', HOVER_ID, 400, 380, 0, 0); // back to hovering — id 1 again
+  const iRingA = ringXY();
+  ev('pointermove', HOVER_ID, 460, 390, 0, 0);
+  out.I_ringFollowsHover = iRingA !== ringXY() && ringXY() !== '';
+  const beforeI2 = inkPixels(base);
+  for (let i = 0; i <= 20; i++) ev('pointermove', 7002, 400 + i * 6, 420 + i * 2, 0.6, 1); // next stroke, next id
+  await sleep(40);
+  ev('pointerup', 7002, 520, 460, 0, 0);
+  await sleep(60);
+  out.I_committed = inkPixels(base) - beforeI2;
+  out.I_active = await hud();
+  void beforeI;
+
   out.hudLine = document.body.innerText.match(/act .*|down .*|up .*/g)?.join(' | ');
   return out;
 });
@@ -173,6 +201,11 @@ check('F releases the surface', result.F_active === '-1', `act=${result.F_active
 check('G hover ring follows a pen REUSING the stale pointerId', result.G_ringFollowsSameId === true, `${result.G_ringFollowsSameId}`);
 check('G next stroke on the SAME pointerId still draws', result.G_committed > 0, `${result.G_committed} px`);
 check('G releases the surface', result.G_active === '-1', `act=${result.G_active}`);
+check('H touchstart is CANCELLED (Scribble defence, non-passive listener)', result.H_touchStartPrevented === true, `${result.H_touchStartPrevented}`);
+check('H touchmove is CANCELLED', result.H_touchMovePrevented === true, `${result.H_touchMovePrevented}`);
+check("I ring follows hover (WebKit's real id scheme: hover=1, fresh id per contact)", result.I_ringFollowsHover === true, `${result.I_ringFollowsHover}`);
+check('I next stroke draws after a lost lift, real id scheme', result.I_committed > 0, `${result.I_committed} px`);
+check('I releases the surface', result.I_active === '-1', `act=${result.I_active}`);
 
 console.log(`\n[${ENGINE}] HUD:`, result.hudLine, '\n');
 for (const p of pass) console.log('  PASS  ' + p);
