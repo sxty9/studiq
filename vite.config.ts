@@ -22,12 +22,20 @@ const stamp = (() => {
 })();
 
 // studiq cut 1 is a mock-first SPA. It vendors the Holistic/devlab Apple design tokens
-// (src/theme) verbatim. No backend yet: httpSource is a documented stub. When studiqd lands,
-// re-add a `server.proxy['/api']` block here (see devlab/vite.config.ts).
+// (src/theme) verbatim. The FUSE tab is backed by the `scrapr` holistic service; the dev proxy
+// forwards /api to the holistic Caddy origin (which routes /api/services/scrapr/* → scraprd and
+// /api/auth/* → the dashboard) so the first-party h_access session cookie flows same-origin.
+// Point it at your holistic edge with STUDIQ_API_TARGET (default https://holistic.local). When
+// unset/unreachable the app falls back to mock. For a no-proxy E2E, serve dist behind Caddy.
+const apiTarget = process.env.STUDIQ_API_TARGET || 'https://holistic.local';
+
 export default defineConfig({
   plugins: [react()],
   define: { __BUILD__: JSON.stringify(stamp) },
   resolve: { alias: [{ find: '@', replacement: r('./src') }], dedupe: ['react', 'react-dom'] },
-  server: { port: 5173 },
+  server: {
+    port: 5173,
+    proxy: { '/api': { target: apiTarget, changeOrigin: true, secure: false } },
+  },
   build: { outDir: 'dist', emptyOutDir: true },
 });
