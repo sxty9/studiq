@@ -1,5 +1,6 @@
 import type { DataSource } from './source';
 import { NotImplementedError } from './source';
+import { KATEGORIEN } from '@/types';
 import type { Document, Scraper, ScraperRun, StudiqInit } from '@/types';
 
 /* studiq's FUSE tab (scraper registry + ingest) talks to the `scrapr` holistic service at
@@ -96,7 +97,9 @@ export const httpSource: DataSource = {
 
   // ── FUSE: scraper registry + ingest (backed by scrapr) ─────────────────────
   scrapers: async () => json<Scraper[]>(await request(`${base}/scrapers`)),
-  addScraper: async (input) => json<Scraper>(await post(`${base}/scrapers`, input)),
+  // scrapr is domain-agnostic and imposes no taxonomy; studiq supplies ITS learning taxonomy
+  // (KATEGORIEN) as the scraper's category vocabulary — that is studiq's role in the split.
+  addScraper: async (input) => json<Scraper>(await post(`${base}/scrapers`, { ...input, categories: KATEGORIEN })),
   updateScraper: async (id, patch) => json<Scraper>(await post(`${base}/scrapers/${enc(id)}`, patch)),
   triggerScraper: async (id) => json<ScraperRun>(await post(`${base}/scrapers/${enc(id)}/trigger`)),
   documents: async () => json<Document[]>(await request(`${base}/documents`)),
