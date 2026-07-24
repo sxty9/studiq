@@ -45,7 +45,7 @@ Die Mechanik (Strukturen) liegt im Kernel (lakearch §9–§11); die Berechnung 
 ### 7.1 Identitäts-Auflösung (lakearch §9; Berechnung: `compute-layer.md` §2)
 - **Konzept-Anker:** Jedes mehrfach belegte Konzept bekommt einen Klassen-Knoten; **Karten/Mastery/Plan hängen am Anker**, nie an einem Repräsentanten.
 - **Clustering-Schwellen (Startwerte, kalibrierbar):** `verwandt_mit` ab ~0.80 (anzeigen, „bestätigen?"); automatische Klassen-Zusammenlegung erst ab ~0.95; darunter getrennt lassen. **Keine transitive Closure** — Cut-Clustering.
-- **Split-Kriterium:** widerspricht eine höher-vertraute Quelle oder eine menschliche Korrektur, wird die Klasse geteilt.
+- **Split-Kriterium:** widerspricht eine höher-vertraute Quelle oder eine menschliche Korrektur, wird die Klasse geteilt. Zusammenlegen wie Teilen werden atomar sichtbar (§7.6).
 
 ### 7.2 Resolver-Vertrauensränge (lakearch §5.6 Vertrauensgrad als Quell-Kontext, §8.2 Quell-Gewichtung beim Lesen)
 Startordnung (absteigend), kalibrierbar:
@@ -63,7 +63,7 @@ Startordnung (absteigend), kalibrierbar:
 
 ### 7.4 Checkpoint-Politik (lakearch §10 Materialisierung)
 - **Was:** pro Konzept-Anker die **SR-Parameter** (Stabilität, letzte Wiederholung, Schwierigkeit) — **nicht** die abgeleitete Mastery-Prozentzahl.
-- **Kadenz:** ein neuer Checkpoint nach jeder Lern-Session (+ bei Bedarf nach Merge/Split-Invalidierung).
+- **Kadenz:** ein neuer Checkpoint nach jeder Lern-Session (+ bei Bedarf nach Merge/Split-Invalidierung) — die Erneuerung wird atomar sichtbar (§7.6).
 - **Live-Mastery** = Checkpoint + Vergessenskurve über verstrichene Zeit (billig).
 - **SR-Algorithmus:** noch zu wählen (§8 B-neu).
 
@@ -71,6 +71,11 @@ Startordnung (absteigend), kalibrierbar:
 - **Scopes:** Vault als Scope-Label; Modul kann über Vaults geteilt sein (mehrere Scopes pro Daten).
 - **Rechte:** `lesen` / `schreiben` / `besitzen` (Owner verwaltet Grants).
 - **Geteilte Konzepte:** ein geteilter Klassen-Knoten, dessen private Repräsentanten beim Lesen pro Scope gefiltert werden (filter-before-resolve — kein Leak privater Quellen).
+
+### 7.6 Daten-Integrität (lakearch §1.4–1.5, §13; Rechen-Schicht: `compute-layer.md` §6)
+Zwei Verfassungs-Axiome, hier als Profil-Politik verankert.
+- **Passiver Speicher.** studiqarch ist **Vokabular als Daten** (§2), keine Logik im Speicher. Jede Auswertung des Lernmodells läuft **außerhalb** von lakearch — in der Rechen-Schicht oder beim Lesen: die **Mastery-Projektion** und die **Vergessenskurve** über der Live-Mastery (§7.4), die **Clustering-Schwellen** (§7.1), die **Vertrauensränge** und ihre Gewichtung (§7.2). lakearch hält diese Kriterien nur als träge Kontexte; sie zu lesen ist Traversierung, sie anzuwenden ist Sache der Schicht darüber (lakearch §7.3).
+- **Atomare Zugriffe.** Jede Profil-Operation, die **mehr als ein Daten umformt**, wird gemeinsam durch das einzige Aktiv-Schreiben sichtbar (lakearch §13): das **Zusammenlegen oder Teilen eines Konzept-Ankers** (§7.1), das **Verbergen und Mergen der Kuratierung** (§7.3), die **Checkpoint-Erneuerung nach Merge/Split-Invalidierung** (§7.4). Ein halb zusammengelegtes oder halb geteiltes Konzept ist **niemals beobachtbar**; ein gleichzeitig laufender `Abruf-Versuch` liest stets einen konsistenten Schnappschuss. Einzelne Ereignis-Daten — ein `Abruf-Versuch`, eine neue `Quelle` — sind als Einzel-append von sich aus atomar (lakearch §7.1).
 
 ## 8. Offene Entscheidungen (studiq-spezifisch)
 
