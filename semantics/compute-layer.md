@@ -45,10 +45,23 @@ Zerlegung großer Eingaben in semantische Chunks ist **Vorverarbeitung vor dem a
 
 ## 5. Platzhalter-Auflösung
 
-Verweist etwas auf ein noch nicht vorhandenes Daten, steht dort ein **Platzhalter-Daten** (lakearch §3.6). Diese Schicht erkennt eintreffende Daten, die einen Platzhalter erfüllen, und löst ihn über Fortschreibung (§6.3) oder Korrelation (§5.7 b) auf.
+Verweist etwas auf ein noch nicht vorhandenes Daten, steht dort ein **Platzhalter-Daten** (lakearch §3.6). Diese Schicht erkennt eintreffende Daten, die einen Platzhalter erfüllen, und löst ihn über Fortschreibung (lakearch §6.3) oder Korrelation (lakearch §5.7 b) auf.
 
-## 6. Abgrenzung
+## 6. Daten-Integrität (Invarianten dieser Schicht)
 
-- **Generisch (hier):** Platzierungs-Agent, Korrelations-/Inbox-Muster, Modell-Eskalation, Caching-via-Materialisierung, Chunking.
+Zwei Verfassungs-Axiome binden diese Schicht unmittelbar. Beide ruhen auf lakearch-Primitiven; dieses Dokument nennt die Pflicht, ohne die Mechanik des Kernels zu wiederholen.
+
+### 6.1 Passiver Speicher
+lakearch ist ein reiner, passiver Speicher: er hält Daten, ohne sie zu deuten, zu bewerten oder eigene Logik auszuführen (lakearch §1.4). **Diese Schicht ist der einzige Ort der Auswertung.** Jedes Ranking, jede Ähnlichkeit, jede Eskalations- und Platzierungswahl (§2), jedes Chunking (§4) entsteht hier und kehrt nur als **fertiges, träges Ergebnis-Daten** in den Speicher zurück. Die Caching-Materialisierung (§3) trägt ihre Herkunft als Kontext (lakearch §10.2); der Speicher **rechnet sie nie selbst nach**. Die *Erkennung* betroffener Materialisierungen bei geänderter Eingabe ist mechanisches Matching im Kernel (Rückwärts-Traversierung, lakearch §10.3 / §1.7 a); das *Neu-Berechnen* löst diese Schicht aus (§3). So wandert kein Auswertungsschritt je in den Speicher.
+
+### 6.2 Atomare Zugriffe
+Jeder Datenzugriff — lesend wie schreibend — ist unteilbar und ohne beobachtbaren Zwischenzustand.
+- **Einzel-append** (der Normalfall der Platzierung, §2) ist als ein Schreibvorgang von sich aus atomar (lakearch §7.1).
+- **Mehr-Daten-Rückgabe** wird **gemeinsam durch ein einziges abschließendes Aktiv-Schreiben sichtbar** (lakearch §13): eine Re-Korrelation, die Inbox-Daten neu einhängt (§2.3); eine invalidierungs-getriebene Neu-Berechnung mehrerer abgeleiteter Daten (§3); eine Platzhalter-Auflösung samt Verbindung (§5). Bis der Aktiv-Marker gesetzt ist, gelten die Teile als inaktiv; Traversierung ignoriert sie.
+- **Folge für das Lesen:** Eine Projektion sieht daher stets einen konsistenten Schnappschuss, nie eine halb vollzogene Umstrukturierung. Read-Atomarität ist keine zusätzliche Maschinerie, sondern die Kehrseite des Aktiv-Markers.
+
+## 7. Abgrenzung
+
+- **Generisch (hier):** Platzierungs-Agent, Korrelations-/Inbox-Muster, Modell-Eskalation, Caching-via-Materialisierung, Chunking, Daten-Integrität (Passiver Speicher · atomare Schreib-Rückgabe, §6).
 - **Domänen-spezifisch (→ `studiqarch-v2.md` §7):** konkrete Clustering-Schwellen, Vertrauensränge, welche Modelle, Checkpoint-Kadenz, Vault-Scopes, DevLab-Runner.
 - **Niemals hier:** Speichern/Traversieren/Matchen — das ist und bleibt lakearch.
