@@ -13,7 +13,15 @@ import type {
 
 /** The single seam between the UI and its data. `mockSource` serves seeded in-memory data;
  *  `httpSource` will talk to the future `studiqd` /api. UI components are agnostic to which is
- *  active — swapping mock→http is the whole backend-integration story. */
+ *  active — swapping mock→http is the whole backend-integration story.
+ *
+ *  Daten-Integrität — the two data-model axioms bind this seam (semantics/compute-layer.md §6,
+ *  studiqarch-v2.md §7.6), so EVERY implementation upholds them:
+ *   · Passive store — a read returns an inert SNAPSHOT (a deep copy that shares no live reference
+ *     with the store), so a caller can never mutate stored state through a returned value. The seam
+ *     holds data; it never interprets or evaluates it — all evaluation lives above it (lib/organize).
+ *   · Atomic access — every read and write is one indivisible step: a caller never observes a
+ *     half-applied write, and a read always sees a single consistent snapshot. */
 export interface DataSource {
   init(): Promise<StudiqInit>;
 

@@ -19,6 +19,13 @@ import type { DataSource } from './source';
 const delay = <T>(value: T, ms = 40): Promise<T> => new Promise((res) => setTimeout(() => res(value), ms));
 const now = () => new Date().toISOString();
 
+// Daten-Integrität (DataSource contract): reads hand back an inert SNAPSHOT — a deep copy that
+// shares no reference with the store — so a caller can never reach back in and mutate stored state,
+// and always sees one consistent snapshot. Writes clone on the way IN for the same reason. This is
+// the passive-store + atomic-access invariant made uniform (one clone at the seam instead of ad-hoc
+// per-site spreads). structuredClone is total over this plain-data store (strings/numbers/arrays).
+const snapshot = <T>(v: T): T => structuredClone(v);
+
 // ── seed helpers ──────────────────────────────────────────────────────────────
 const stroke = (tool: StrokeTool, color: string, width: number, pts: [number, number, number?][]): Stroke => ({
   id: uid('st'),
@@ -135,17 +142,17 @@ export const mockSource: DataSource = {
   init: () => delay({ mode: 'mock', signedIn: true }),
 
   // ── FUSE ──
-  scrapers: () => delay(scrapers.map((s) => ({ ...s }))),
+  scrapers: () => delay(snapshot(scrapers)),
   addScraper: (input) => {
     const s: Scraper = { ...input, id: uid('sc') };
     scrapers.push(s);
-    return delay({ ...s });
+    return delay(snapshot(s));
   },
   updateScraper: (id, patch) => {
     const s = scrapers.find((x) => x.id === id);
     if (!s) return Promise.reject(new Error(`unknown scraper ${id}`));
     Object.assign(s, patch);
-    return delay({ ...s });
+    return delay(snapshot(s));
   },
   triggerScraper: (id) => {
     const s = scrapers.find((x) => x.id === id);
@@ -160,37 +167,39 @@ export const mockSource: DataSource = {
       made.push(doc);
     }
     s.lastRun = { at: now(), status: 'ok', added: made.length };
+    // `made` items are also live in the `documents` store — snapshot so the run carries copies, not
+    // handles into the store (passive-store invariant).
     const run: ScraperRun = { scraperId: s.id, at: s.lastRun.at, status: 'ok', added: made.length, documents: made };
-    return delay(run, 320); // a little longer so the vortex pulse reads
+    return delay(snapshot(run), 320); // a little longer so the vortex pulse reads
   },
 
-  documents: () => delay(documents.map((d) => ({ ...d }))),
+  documents: () => delay(snapshot(documents)),
   addManualDocument: (input) => {
     const doc: Document = { ...input, id: uid('d'), source: 'manual', addedAt: now() };
     documents.unshift(doc);
-    return delay({ ...doc });
+    return delay(snapshot(doc));
   },
 
   // ── NOTE ──
-  modules: () => delay(modules.map((m) => ({ ...m }))),
-  sessions: () => delay(sessions.map((s) => ({ ...s }))),
-  notes: () => delay(notes.map((n) => ({ ...n, pages: n.pages.map((p) => ({ ...p })) }))),
+  modules: () => delay(snapshot(modules)),
+  sessions: () => delay(snapshot(sessions)),
+  notes: () => delay(snapshot(notes)),
   createNote: ({ title, moduleId, sessionId }) => {
     const n = makeNote(uid('n'), title, moduleId, sessionId, now());
     notes.unshift(n);
-    return delay({ ...n, pages: n.pages.map((p) => ({ ...p })) });
+    return delay(snapshot(n));
   },
   addPage: (noteId) => {
     const n = notes.find((x) => x.id === noteId);
     if (!n) return Promise.reject(new Error(`unknown note ${noteId}`));
     n.pages.push(page(noteId, n.pages.length, n.pages[n.pages.length - 1]?.background ?? 'ruled'));
     n.updatedAt = now();
-    return delay({ ...n, pages: n.pages.map((p) => ({ ...p })) });
+    return delay(snapshot(n));
   },
 
-  pageStrokes: (pageId) => delay((strokesByPage.get(pageId) ?? []).map((s) => ({ ...s, points: s.points.map((p) => ({ ...p })) }))),
+  pageStrokes: (pageId) => delay(snapshot(strokesByPage.get(pageId) ?? [])),
   savePageStrokes: (pageId, strokes) => {
-    strokesByPage.set(pageId, strokes.map((s) => ({ ...s, points: s.points.map((p) => ({ ...p })) })));
+    strokesByPage.set(pageId, snapshot(strokes)); // clone on write-in: the caller keeps no handle into the store
     return delay(undefined);
   },
 
